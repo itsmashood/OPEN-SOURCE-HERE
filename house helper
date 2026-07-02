@@ -312,9 +312,6 @@ local function setHouseListed(shouldList)
     busyHouseState = false
 end
 
--- keep your current script exactly the same,
--- but replace ONLY your useMagicDoor() function with this:
-
 local function useMagicDoor()
     local api = ReplicatedStorage:WaitForChild("API")
     local magicDoorUnique = "2_6678f337ff7742638cbd7f6deb5581a0"
@@ -961,10 +958,10 @@ MainTab:CreateToggle({
 
                         if msg and msg ~= "" then
                             sendChatMessage(msg)
+                            task.wait(interval)
                         end
-
-                        task.wait(interval)
                     end
+                    task.wait(0.1)
                 end
             end)
         end
