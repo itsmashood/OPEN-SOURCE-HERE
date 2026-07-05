@@ -85,6 +85,29 @@ local selectedTradePetExportItems = {}
 local tradePetDropdown = nil
 local autoAddSelectedPets = false
 local autoAddSelectedPetsLoopRunning = false
+local autoAccept = false
+local autoAcceptLoopRunning = false
+local lastAutoAcceptAt = 0
+local autoAcceptAlreadyAcceptedCurrentWin = false
+local autoAcceptLastTradeSignature = ""
+local autoAcceptAcceptedTradeSignature = ""
+local AUTO_ACCEPT_RETRY_DELAY = 1.5
+local AUTO_ACCEPT_DECLINE_AFTER_SECONDS = 90
+local AUTO_ACCEPT_QUICK_CHAT_MIN_DELAY = 8
+local AUTO_ACCEPT_QUICK_CHAT_MAX_DELAY = 15
+local AUTO_ACCEPT_QUICK_CHAT_PRESET_ID = 4
+local autoAcceptWaitingForWinSince = 0
+local autoAcceptNextQuickChatAt = 0
+local autoAcceptDeclineSentForCurrentTrade = false
+local autoAcceptWasTradeOpen = false
+local autoAcceptQuickChatMessages = {
+    "Could you add a little more please?",
+    "Can you add more until it is a win?",
+    "Please keep adding until it is a win.",
+    "Can you add a bit more?",
+    "Need a little more for win please.",
+    "Please add more, I will accept if it is a win."
+}
 local MAX_TRADE_ITEMS_TO_ADD = 18
 
 local function notify(title, content, duration)
@@ -612,6 +635,266 @@ local function getTradeResult()
     end
 
     return nil
+end
+
+local function getTradeWindowSignature()
+    local parts = {}
+    local tradeRoots = {}
+
+    for _, root in ipairs(getGuiSearchRoots()) do
+        for _, child in ipairs(root:GetChildren()) do
+            local childName = tostring(child.Name):lower()
+
+            if childName:find("trade") then
+                table.insert(tradeRoots, child)
+            end
+        end
+    end
+
+    if #tradeRoots == 0 then
+        return "no_trade_gui"
+    end
+
+    local added = 0
+
+    local function addPart(value)
+        added += 1
+
+        if added <= 700 then
+            table.insert(parts, tostring(value))
+        end
+    end
+
+    for _, tradeRoot in ipairs(tradeRoots) do
+        if tradeRoot and tradeRoot.Parent then
+            addPart(tradeRoot:GetFullName())
+
+            for _, descendant in ipairs(tradeRoot:GetDescendants()) do
+                if isGuiObjectActuallyVisible(descendant) then
+                    if descendant:IsA("TextLabel") or descendant:IsA("TextButton") or descendant:IsA("TextBox") then
+                        addPart(descendant:GetFullName() .. "=" .. tostring(descendant.Text))
+                    elseif descendant:IsA("ImageLabel") or descendant:IsA("ImageButton") then
+                        addPart(descendant:GetFullName() .. "=" .. tostring(descendant.Image))
+                    end
+                end
+            end
+        end
+    end
+
+    table.sort(parts)
+
+    return table.concat(parts, "||")
+end
+
+local function getTradeApiRemote(remoteName)
+    local api = ReplicatedStorage:FindFirstChild("API")
+
+    if not api then
+        warn("[Auto Accept] API folder not found")
+        return nil
+    end
+
+    local remote = api:FindFirstChild(remoteName)
+
+    if not remote then
+        warn("[Auto Accept] " .. tostring(remoteName) .. " remote not found")
+        return nil
+    end
+
+    if not remote:IsA("RemoteFunction") and not remote:IsA("RemoteEvent") then
+        warn("[Auto Accept] " .. tostring(remoteName) .. " is not a remote. Class:", remote.ClassName)
+        return nil
+    end
+
+    return remote
+end
+
+local function callTradeApiRemote(remoteName, ...)
+    local remote = getTradeApiRemote(remoteName)
+
+    if not remote then
+        return false
+    end
+
+    local args = {...}
+
+    local ok, result = pcall(function()
+        if remote:IsA("RemoteFunction") then
+            return remote:InvokeServer(unpack(args))
+        elseif remote:IsA("RemoteEvent") then
+            remote:FireServer(unpack(args))
+            return "sent"
+        end
+    end)
+
+    if not ok then
+        warn("[Auto Accept] " .. tostring(remoteName) .. " failed:", result)
+        return false
+    end
+
+    return true, result
+end
+
+local function acceptNegotiationOnce()
+    local ok, result = callTradeApiRemote("TradeAPI/AcceptNegotiation")
+
+    if ok then
+        print("[Auto Accept] WIN detected. AcceptNegotiation result:", result)
+    end
+
+    return ok
+end
+
+local function declineTradeOnce()
+    local ok, result = callTradeApiRemote("TradeAPI/DeclineTrade")
+
+    if ok then
+        print("[Auto Accept] No WIN after " .. tostring(AUTO_ACCEPT_DECLINE_AFTER_SECONDS) .. " seconds. DeclineTrade result:", result)
+    end
+
+    return ok
+end
+
+local function getAutoAcceptTradePartner()
+    local playerGui = player:FindFirstChildOfClass("PlayerGui")
+    local tradeApp = playerGui and playerGui:FindFirstChild("TradeApp")
+
+    if not tradeApp then
+        return nil
+    end
+
+    for _, obj in ipairs(tradeApp:GetDescendants()) do
+        if obj:IsA("TextLabel") and obj.Text then
+            local name = obj.Text:match("You're chatting with ([%w_]+)") or obj.Text:match("chatting with ([%w_]+)")
+
+            if name then
+                return Players:FindFirstChild(name)
+            end
+        end
+    end
+
+    return nil
+end
+
+local function sendAutoAcceptQuickChat()
+    local partner = getAutoAcceptTradePartner()
+
+    if not partner then
+        warn("[Auto Accept] Trade partner not found for quick chat")
+        return false
+    end
+
+    local ok, result = callTradeApiRemote("TradeAPI/SendQuickChat", partner, AUTO_ACCEPT_QUICK_CHAT_PRESET_ID)
+
+    if ok then
+        print("[Auto Accept] Sent quick chat preset " .. tostring(AUTO_ACCEPT_QUICK_CHAT_PRESET_ID) .. " to:", partner.Name, result)
+    end
+
+    return ok
+end
+
+local function resetAutoAcceptTradeTimers()
+    autoAcceptWaitingForWinSince = 0
+    autoAcceptNextQuickChatAt = 0
+    autoAcceptDeclineSentForCurrentTrade = false
+    autoAcceptWasTradeOpen = false
+    autoAcceptAlreadyAcceptedCurrentWin = false
+    autoAcceptLastTradeSignature = ""
+    autoAcceptAcceptedTradeSignature = ""
+end
+
+local function scheduleNextAutoAcceptQuickChat(now)
+    autoAcceptNextQuickChatAt = now + math.random(AUTO_ACCEPT_QUICK_CHAT_MIN_DELAY, AUTO_ACCEPT_QUICK_CHAT_MAX_DELAY)
+end
+
+local function startAutoAccept()
+    if autoAcceptLoopRunning then return end
+
+    autoAcceptLoopRunning = true
+
+    task.spawn(function()
+        resetAutoAcceptTradeTimers()
+
+        while autoAccept do
+            if not tradeHelperEnabled then
+                autoAccept = false
+                notify("Auto Accept", "This will not work unless activate trade helper is on it's needed to check values", 4)
+                break
+            end
+
+            local now = os.clock()
+            local currentTradeSignature = getTradeWindowSignature()
+            local tradeOpen = currentTradeSignature ~= "no_trade_gui"
+
+            if not tradeOpen then
+                resetAutoAcceptTradeTimers()
+                task.wait(0.5)
+                continue
+            end
+
+            if tradeOpen and not autoAcceptWasTradeOpen then
+                autoAcceptWasTradeOpen = true
+                autoAcceptWaitingForWinSince = now
+                scheduleNextAutoAcceptQuickChat(now)
+                autoAcceptDeclineSentForCurrentTrade = false
+                autoAcceptAlreadyAcceptedCurrentWin = false
+                autoAcceptLastTradeSignature = ""
+                autoAcceptAcceptedTradeSignature = ""
+                print("[Auto Accept] Trade detected. Waiting up to " .. tostring(AUTO_ACCEPT_DECLINE_AFTER_SECONDS) .. " seconds for WIN.")
+            end
+
+            local result = getTradeResult()
+
+            if result == "WIN" then
+                autoAcceptWaitingForWinSince = 0
+                autoAcceptNextQuickChatAt = 0
+                autoAcceptDeclineSentForCurrentTrade = false
+
+                local tradeSignature = currentTradeSignature
+
+                if tradeSignature ~= autoAcceptLastTradeSignature then
+                    autoAcceptLastTradeSignature = tradeSignature
+                    autoAcceptAlreadyAcceptedCurrentWin = false
+                end
+
+                if now - lastAutoAcceptAt >= AUTO_ACCEPT_RETRY_DELAY then
+                    lastAutoAcceptAt = now
+
+                    if acceptNegotiationOnce() then
+                        autoAcceptAlreadyAcceptedCurrentWin = true
+                        autoAcceptAcceptedTradeSignature = tradeSignature
+                    end
+                end
+            else
+                autoAcceptAlreadyAcceptedCurrentWin = false
+                autoAcceptLastTradeSignature = ""
+                autoAcceptAcceptedTradeSignature = ""
+
+                if not autoAcceptDeclineSentForCurrentTrade then
+                    if autoAcceptWaitingForWinSince <= 0 then
+                        autoAcceptWaitingForWinSince = now
+                        scheduleNextAutoAcceptQuickChat(now)
+                    end
+
+                    if autoAcceptNextQuickChatAt > 0 and now >= autoAcceptNextQuickChatAt then
+                        sendAutoAcceptQuickChat()
+                        scheduleNextAutoAcceptQuickChat(now)
+                    end
+
+                    if now - autoAcceptWaitingForWinSince >= AUTO_ACCEPT_DECLINE_AFTER_SECONDS then
+                        autoAcceptDeclineSentForCurrentTrade = true
+                        declineTradeOnce()
+                        notify("Auto Accept", "No WIN detected after 90 seconds. Declined trade.", 4)
+                    end
+                end
+            end
+
+            task.wait(0.5)
+        end
+
+        resetAutoAcceptTradeTimers()
+        autoAcceptLoopRunning = false
+    end)
 end
 
 local function startAutoTrade()
@@ -1299,6 +1582,7 @@ TradeTab:CreateToggle({
             end)
         else
             autoTrade = false
+            autoAccept = false
         end
     end
 })
@@ -1401,6 +1685,23 @@ TradeTab:CreateToggle({
     Name = "Auto accept",
     CurrentValue = false,
     Callback = function(value)
+        if value and not tradeHelperEnabled then
+            autoAccept = false
+            notify("Auto Accept", "This will not work unless activate trade helper is on it's needed to check values", 4)
+            return
+        end
+
+        autoAccept = value
+
+        if autoAccept then
+            lastAutoAcceptAt = 0
+            resetAutoAcceptTradeTimers()
+            startAutoAccept()
+            notify("Auto Accept", "Enabled. It accepts/re-accepts WIN trades only, sends Please add more quick chat while waiting, and declines after 90 seconds without WIN. It will not confirm.", 5)
+        else
+            resetAutoAcceptTradeTimers()
+            notify("Auto Accept", "Disabled.", 3)
+        end
     end
 })
 
