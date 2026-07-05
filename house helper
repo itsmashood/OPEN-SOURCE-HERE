@@ -51,6 +51,10 @@ local theirOfferText = ""
 local lookupParagraph = nil
 local tradeParagraph = nil
 
+local tradeHelperEnabled = false
+local autoTrade = false
+local autoTradeLoopRunning = false
+
 local function notify(title, content, duration)
     Rayfield:Notify({
         Title = title,
@@ -481,6 +485,139 @@ local function copyCurrentServerInfo()
     end
 end
 
+local function addGuiSearchRoot(roots, seen, root)
+    if root and not seen[root] then
+        seen[root] = true
+        table.insert(roots, root)
+    end
+end
+
+local function getGuiSearchRoots()
+    local roots = {}
+    local seen = {}
+
+    addGuiSearchRoot(roots, seen, player:FindFirstChildOfClass("PlayerGui"))
+
+    pcall(function()
+        addGuiSearchRoot(roots, seen, game:GetService("CoreGui"))
+    end)
+
+    pcall(function()
+        if gethui then
+            addGuiSearchRoot(roots, seen, gethui())
+        end
+    end)
+
+    return roots
+end
+
+local function isGuiObjectActuallyVisible(guiObject)
+    local current = guiObject
+
+    while current do
+        if current:IsA("GuiObject") and current.Visible == false then
+            return false
+        end
+
+        if current:IsA("LayerCollector") and current.Enabled == false then
+            return false
+        end
+
+        current = current.Parent
+    end
+
+    if guiObject:IsA("GuiObject") then
+        if guiObject.AbsoluteSize.X <= 0 or guiObject.AbsoluteSize.Y <= 0 then
+            return false
+        end
+
+        if guiObject:IsA("TextLabel") or guiObject:IsA("TextButton") or guiObject:IsA("TextBox") then
+            if guiObject.TextTransparency >= 1 then
+                return false
+            end
+        end
+    end
+
+    return true
+end
+
+local function normalizeTradeResultText(text)
+    return tostring(text or "")
+        :upper()
+        :gsub("<[^>]->", "")
+        :gsub("%s+", "")
+        :gsub("[^%a]", "")
+end
+
+local function getTradeResult()
+    local foundWin = false
+    local foundFair = false
+
+    for _, root in ipairs(getGuiSearchRoots()) do
+        for _, descendant in ipairs(root:GetDescendants()) do
+            if descendant:IsA("TextLabel") or descendant:IsA("TextButton") or descendant:IsA("TextBox") then
+                if isGuiObjectActuallyVisible(descendant) then
+                    local cleanText = normalizeTradeResultText(descendant.Text)
+
+                    if cleanText == "LOSE" or cleanText == "LOSS" then
+                        return "LOSE"
+                    elseif cleanText == "FAIR" then
+                        foundFair = true
+                    elseif cleanText == "WIN" then
+                        foundWin = true
+                    end
+                end
+            end
+        end
+    end
+
+    if foundWin then
+        return "WIN"
+    end
+
+    if foundFair then
+        return "FAIR"
+    end
+
+    return nil
+end
+
+local function startAutoTrade()
+    if autoTradeLoopRunning then return end
+
+    autoTradeLoopRunning = true
+
+    task.spawn(function()
+        while autoTrade do
+            if not tradeHelperEnabled then
+                autoTrade = false
+                notify("Auto Trade", "This will not work unless activate trade helper is on it's needed to check values", 4)
+                break
+            end
+
+            local result = getTradeResult()
+
+            if result == "WIN" then
+                print("[Auto Trade]: Trade is good. WIN detected.")
+            elseif result == "FAIR" then
+                print("[Auto Trade]: Trade is fair. FAIR detected.")
+            elseif result == "LOSE" then
+                print("[Auto Trade]: Trade is bad. LOSE detected.")
+            else
+                print("[Auto Trade]: No WIN / FAIR / LOSE result detected.")
+            end
+
+            local waited = 0
+            while autoTrade and waited < 10 do
+                task.wait(1)
+                waited += 1
+            end
+        end
+
+        autoTradeLoopRunning = false
+    end)
+end
+
 local Window = Rayfield:CreateWindow({
     Name = "Xyneria hub",
     LoadingTitle = "Xyneria hub",
@@ -589,12 +726,51 @@ TradeTab:CreateParagraph({
     Content = "Values auto-load from GitHub. Plain pets use regular values. Use np/no potion for no-potion values."
 })
 
-TradeTab:CreateButton({
+TradeTab:CreateToggle({
     Name = "Activate Trade Helper",
-    Callback = function()
-        pcall(function()
-            loadstring(game:HttpGet("https://api.luarmor.net/files/v4/loaders/9a01589e88fa6dd4e85c1bc2e56e4da3.lua"))()
-        end)
+    CurrentValue = false,
+    Callback = function(value)
+        tradeHelperEnabled = value
+
+        if value then
+            pcall(function()
+                loadstring(game:HttpGet("https://api.luarmor.net/files/v4/loaders/9a01589e88fa6dd4e85c1bc2e56e4da3.lua"))()
+            end)
+        else
+            autoTrade = false
+        end
+    end
+})
+
+TradeTab:CreateToggle({
+    Name = "Auto Trade",
+    CurrentValue = false,
+    Callback = function(value)
+        if value and not tradeHelperEnabled then
+            autoTrade = false
+            notify("Auto Trade", "This will not work unless activate trade helper is on it's needed to check values", 4)
+            return
+        end
+
+        autoTrade = value
+
+        if autoTrade then
+            startAutoTrade()
+        end
+    end
+})
+
+TradeTab:CreateToggle({
+    Name = "Auto accept",
+    CurrentValue = false,
+    Callback = function(value)
+    end
+})
+
+TradeTab:CreateToggle({
+    Name = "Auto confirm",
+    CurrentValue = false,
+    Callback = function(value)
     end
 })
 
