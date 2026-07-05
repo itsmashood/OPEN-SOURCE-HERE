@@ -25,6 +25,20 @@ local activeMessageCount = MAX_MESSAGES
 local interval = 5
 local sending = false
 
+local TradeMessages = {
+    "Trading pets!",
+    "Send offers!",
+    "Looking for fair trades!"
+}
+
+for i = 4, MAX_MESSAGES do
+    TradeMessages[i] = ""
+end
+
+local tradeActiveMessageCount = MAX_MESSAGES
+local tradeMessageInterval = 5
+local tradeMessageSending = false
+
 local autoMagicDoor = false
 local magicDoorDelay = 55
 local magicDoorLoopRunning = false
@@ -54,6 +68,24 @@ local tradeParagraph = nil
 local tradeHelperEnabled = false
 local autoTrade = false
 local autoTradeLoopRunning = false
+
+local selectedTradePet = ""
+local selectedTradePetDisplay = ""
+local selectedTradePetQuantity = 1
+local selectedTradePetMaxQuantity = 1
+local tradePetCounts = {}
+local tradePetOptionToName = {}
+local tradePetOptionToData = {}
+local selectedTradePetKind = ""
+local selectedTradePetRarity = ""
+local selectedTradePetIds = {}
+local selectedTradePetOptions = {}
+local selectedTradePetDataList = {}
+local selectedTradePetExportItems = {}
+local tradePetDropdown = nil
+local autoAddSelectedPets = false
+local autoAddSelectedPetsLoopRunning = false
+local MAX_TRADE_ITEMS_TO_ADD = 18
 
 local function notify(title, content, duration)
     Rayfield:Notify({
@@ -618,6 +650,534 @@ local function startAutoTrade()
     end)
 end
 
+local function cleanPetName(name)
+    name = tostring(name or "")
+    name = name:gsub("<[^>]->", "")
+    name = name:gsub("%s*x%s*%d+%s*$", "")
+    name = name:gsub("^%s+", "")
+    name = name:gsub("%s+$", "")
+
+    return name
+end
+
+local function getInstanceByPath(path)
+    local current = game
+
+    for part in string.gmatch(path, "[^%.]+") do
+        current = current:FindFirstChild(part)
+
+        if not current then
+            return nil
+        end
+    end
+
+    return current
+end
+
+local function safeRequirePath(path)
+    local moduleScript = getInstanceByPath(path)
+
+    if not moduleScript or not moduleScript:IsA("ModuleScript") then
+        return nil
+    end
+
+    local ok, value = pcall(function()
+        return require(moduleScript)
+    end)
+
+    if ok then
+        return value
+    end
+
+    warn("[Trade Pets]: Failed to require " .. tostring(path) .. ":", value)
+    return nil
+end
+
+local function getKindInfo(kind, kindDb)
+    if type(kind) ~= "string" or type(kindDb) ~= "table" then
+        return nil
+    end
+
+    local data = kindDb[kind]
+
+    if type(data) ~= "table" then
+        return nil
+    end
+
+    return {
+        kind = kind,
+        name = cleanPetName(data.name or data.Name or data.display_name or data.DisplayName or data.displayName or kind),
+        rarity = tostring(data.rarity or data.Rarity or "unknown")
+    }
+end
+
+local function findPetKind(value, kindDb, depth, seen)
+    if depth > 5 then
+        return nil
+    end
+
+    if type(value) == "string" then
+        if getKindInfo(value, kindDb) then
+            return value
+        end
+
+        return nil
+    end
+
+    if type(value) ~= "table" then
+        return nil
+    end
+
+    if seen[value] then
+        return nil
+    end
+
+    seen[value] = true
+
+    local fields = {
+        "kind",
+        "Kind",
+        "id",
+        "Id",
+        "item_id",
+        "itemId",
+        "item_kind",
+        "itemKind",
+        "type",
+        "Type"
+    }
+
+    for _, field in ipairs(fields) do
+        local possibleKind = value[field]
+
+        if type(possibleKind) == "string" and getKindInfo(possibleKind, kindDb) then
+            return possibleKind
+        end
+    end
+
+    for _, child in pairs(value) do
+        local found = findPetKind(child, kindDb, depth + 1, seen)
+
+        if found then
+            return found
+        end
+    end
+
+    return nil
+end
+
+local function getInventoryPetData()
+    local petDataByName = {}
+
+    local kindDb = safeRequirePath("ReplicatedStorage.ClientDB.Inventory.KindDB")
+    local clientData = safeRequirePath("ReplicatedStorage.ClientModules.Core.ClientData")
+
+    if type(kindDb) ~= "table" then
+        warn("[Trade Pets]: KindDB did not load.")
+        return petDataByName
+    end
+
+    if type(clientData) ~= "table" or type(clientData.get) ~= "function" then
+        warn("[Trade Pets]: ClientData did not load.")
+        return petDataByName
+    end
+
+    local ok, inventory = pcall(function()
+        return clientData.get("inventory")
+    end)
+
+    if not ok or type(inventory) ~= "table" then
+        warn("[Trade Pets]: ClientData.get('inventory') did not return inventory data.")
+        return petDataByName
+    end
+
+    local pets = inventory.pets
+
+    if type(pets) ~= "table" then
+        warn("[Trade Pets]: inventory.pets was not found.")
+        return petDataByName
+    end
+
+    for uniqueId, petEntry in pairs(pets) do
+        local kind = findPetKind(petEntry, kindDb, 0, {})
+        local info = getKindInfo(kind, kindDb)
+
+        if info and info.name ~= "" then
+            petDataByName[info.name] = petDataByName[info.name] or {
+                name = info.name,
+                kind = info.kind,
+                rarity = info.rarity,
+                count = 0,
+                ids = {}
+            }
+
+            petDataByName[info.name].count += 1
+            table.insert(petDataByName[info.name].ids, tostring(uniqueId))
+        end
+    end
+
+    return petDataByName
+end
+
+local function rebuildTradePetOptions()
+    local ownedPetData = getInventoryPetData()
+
+    tradePetCounts = {}
+    tradePetOptionToName = {}
+    tradePetOptionToData = {}
+
+    local petList = {}
+
+    for _, petData in pairs(ownedPetData) do
+        table.insert(petList, petData)
+    end
+
+    table.sort(petList, function(a, b)
+        return tostring(a.name):lower() < tostring(b.name):lower()
+    end)
+
+    local options = {}
+
+    for _, petData in ipairs(petList) do
+        local optionName = petData.name .. " x" .. tostring(petData.count)
+
+        tradePetCounts[petData.name] = petData.count
+        tradePetOptionToName[optionName] = petData.name
+        tradePetOptionToData[optionName] = petData
+        table.insert(options, optionName)
+    end
+
+    if #options == 0 then
+        table.insert(options, "No owned pets found - press Refresh Pet List")
+    end
+
+    print("[Trade Pets]: Found " .. tostring(#petList) .. " owned pet type(s).")
+
+    return options
+end
+
+local function normalizeSelectedTradePetOptions(option)
+    local normalized = {}
+    local used = {}
+
+    local function addOption(value)
+        local optionText = tostring(value or "")
+
+        if optionText ~= "" and tradePetOptionToData[optionText] and not used[optionText] then
+            used[optionText] = true
+            table.insert(normalized, optionText)
+        end
+    end
+
+    if type(option) == "table" then
+        for _, value in ipairs(option) do
+            addOption(value)
+        end
+
+        if #normalized == 0 then
+            for key, value in pairs(option) do
+                if type(key) == "string" and value == true then
+                    addOption(key)
+                elseif type(value) == "string" then
+                    addOption(value)
+                end
+            end
+        end
+    else
+        addOption(option)
+    end
+
+    return normalized
+end
+
+local function getCurrentSelectedTradePetDataList()
+    local list = {}
+
+    for _, optionText in ipairs(selectedTradePetOptions) do
+        local data = tradePetOptionToData[optionText]
+
+        if data then
+            table.insert(list, data)
+        end
+    end
+
+    return list
+end
+
+local function getSelectedTradePetUniqueIds()
+    local selectedUniqueIds = {}
+    local selectedPetItems = {}
+    local quantityPerPet = tonumber(selectedTradePetQuantity) or 1
+
+    if quantityPerPet < 1 then
+        quantityPerPet = 1
+    end
+
+    if quantityPerPet > MAX_TRADE_ITEMS_TO_ADD then
+        quantityPerPet = MAX_TRADE_ITEMS_TO_ADD
+    end
+
+    for _, data in ipairs(getCurrentSelectedTradePetDataList()) do
+        local ids = data.ids or {}
+        local chosenForThisPet = {}
+        local maxForThisPet = quantityPerPet
+
+        if maxForThisPet > #ids then
+            maxForThisPet = #ids
+        end
+
+        for i = 1, maxForThisPet do
+            if ids[i] and #selectedUniqueIds < MAX_TRADE_ITEMS_TO_ADD then
+                table.insert(selectedUniqueIds, ids[i])
+                table.insert(chosenForThisPet, ids[i])
+            end
+        end
+
+        table.insert(selectedPetItems, {
+            PetName = data.name or "",
+            DisplayName = (data.name or "") .. " x" .. tostring(data.count or 0),
+            Kind = data.kind or "",
+            Rarity = data.rarity or "",
+            Quantity = #chosenForThisPet,
+            MaxQuantity = tonumber(data.count) or #ids,
+            UniqueIds = ids,
+            SelectedUniqueIds = chosenForThisPet
+        })
+
+        if #selectedUniqueIds >= MAX_TRADE_ITEMS_TO_ADD then
+            break
+        end
+    end
+
+    return selectedUniqueIds, selectedPetItems
+end
+
+local function updateTradePetSelectionExport()
+    local selectedUniqueIds, selectedPetItems = getSelectedTradePetUniqueIds()
+    selectedTradePetDataList = getCurrentSelectedTradePetDataList()
+    selectedTradePetExportItems = selectedPetItems
+
+    _G.XyneriaTradePetSelection = {
+        PetName = selectedTradePet,
+        DisplayName = selectedTradePetDisplay,
+        Kind = selectedTradePetKind,
+        Rarity = selectedTradePetRarity,
+        Quantity = selectedTradePetQuantity,
+        MaxQuantity = selectedTradePetMaxQuantity,
+        UniqueIds = selectedTradePetIds,
+        SelectedUniqueIds = selectedUniqueIds,
+        SelectedOptions = selectedTradePetOptions,
+        SelectedPets = selectedPetItems
+    }
+end
+
+local function setSelectedTradePetFromOption(option)
+    selectedTradePetOptions = normalizeSelectedTradePetOptions(option)
+
+    local firstOption = selectedTradePetOptions[1]
+    selectedTradePetDisplay = tostring(firstOption or "")
+
+    local firstData = firstOption and tradePetOptionToData[firstOption] or nil
+
+    if firstData then
+        selectedTradePet = firstData.name or ""
+        selectedTradePetKind = firstData.kind or ""
+        selectedTradePetRarity = firstData.rarity or ""
+        selectedTradePetIds = firstData.ids or {}
+        selectedTradePetMaxQuantity = tonumber(firstData.count) or 1
+    else
+        selectedTradePet = ""
+        selectedTradePetKind = ""
+        selectedTradePetRarity = ""
+        selectedTradePetIds = {}
+        selectedTradePetMaxQuantity = 1
+    end
+
+    for _, data in ipairs(getCurrentSelectedTradePetDataList()) do
+        local count = tonumber(data.count) or 1
+
+        if count > selectedTradePetMaxQuantity then
+            selectedTradePetMaxQuantity = count
+        end
+    end
+
+    local maxAllowed = selectedTradePetMaxQuantity
+
+    if maxAllowed < 1 then
+        maxAllowed = 1
+    end
+
+    if selectedTradePetQuantity < 1 then
+        selectedTradePetQuantity = 1
+    end
+
+    if selectedTradePetQuantity > maxAllowed then
+        selectedTradePetQuantity = maxAllowed
+    end
+
+    updateTradePetSelectionExport()
+
+    if #selectedTradePetOptions > 0 then
+        print("[Trade Pets]: Selected " .. tostring(#selectedTradePetOptions) .. " pet type(s), quantity each: " .. tostring(selectedTradePetQuantity))
+    else
+        print("[Trade Pets]: No pet selected.")
+    end
+end
+
+local function refreshTradePetDropdown()
+    local options = rebuildTradePetOptions()
+
+    if tradePetDropdown then
+        pcall(function()
+            tradePetDropdown:Refresh(options, true)
+        end)
+    end
+
+    setSelectedTradePetFromOption(options[1])
+end
+
+local function findTradeAddRemote()
+    local api = ReplicatedStorage:FindFirstChild("API")
+    local candidateNames = {
+        "TradeAPI/AddItemToOffer",
+        "TradeAPI/AddItemToTrade",
+        "TradeAPI/AddItem",
+        "TradeAPI/OfferItem",
+        "TradeAPI/AddPetToOffer",
+        "TradeAPI/AddPetToTrade",
+        "AddItemToOffer",
+        "AddItemToTrade",
+        "AddPetToOffer",
+        "AddPetToTrade"
+    }
+
+    if api then
+        for _, name in ipairs(candidateNames) do
+            local remote = api:FindFirstChild(name)
+
+            if remote and (remote:IsA("RemoteEvent") or remote:IsA("RemoteFunction")) then
+                return remote
+            end
+        end
+    end
+
+    local wanted = {}
+
+    for _, name in ipairs(candidateNames) do
+        wanted[name] = true
+    end
+
+    for _, remote in ipairs(ReplicatedStorage:GetDescendants()) do
+        if (remote:IsA("RemoteEvent") or remote:IsA("RemoteFunction")) and wanted[remote.Name] then
+            return remote
+        end
+    end
+
+    return nil
+end
+
+local function isTradeWindowOpen()
+    local playerGui = player:FindFirstChildOfClass("PlayerGui")
+
+    if not playerGui then
+        return false
+    end
+
+    local tradeApps = {
+        "TradeApp",
+        "TradePreviewApp"
+    }
+
+    for _, appName in ipairs(tradeApps) do
+        local app = playerGui:FindFirstChild(appName)
+
+        if app then
+            if app:IsA("LayerCollector") and app.Enabled == false then
+                continue
+            end
+
+            if app:IsA("GuiObject") and isGuiObjectActuallyVisible(app) then
+                return true
+            end
+
+            for _, descendant in ipairs(app:GetDescendants()) do
+                if descendant:IsA("GuiObject") and isGuiObjectActuallyVisible(descendant) then
+                    return true
+                end
+            end
+        end
+    end
+
+    return false
+end
+
+local function addSelectedPetsToTradeOnce()
+    local selectedUniqueIds = getSelectedTradePetUniqueIds()
+
+    if #selectedUniqueIds == 0 then
+        notify("Trade Pets", "No selected pets to add.", 3)
+        return false
+    end
+
+    local remote = findTradeAddRemote()
+
+    if not remote then
+        notify("Trade Pets", "Trade add remote not found.", 4)
+        warn("[Trade Pets]: Could not find TradeAPI/AddItemToOffer remote.")
+        return false
+    end
+
+    local added = 0
+
+    for _, uniqueId in ipairs(selectedUniqueIds) do
+        local ok, err = pcall(function()
+            if remote:IsA("RemoteEvent") then
+                remote:FireServer(uniqueId)
+            elseif remote:IsA("RemoteFunction") then
+                remote:InvokeServer(uniqueId)
+            end
+        end)
+
+        if ok then
+            added += 1
+            print("[Trade Pets]: Added selected pet ID to offer:", uniqueId)
+        else
+            warn("[Trade Pets]: Failed to add pet ID:", uniqueId, err)
+        end
+
+        task.wait(0.25)
+    end
+
+    notify("Trade Pets", "Auto-added " .. tostring(added) .. " selected pet(s). Not confirming.", 4)
+    return added > 0
+end
+
+local function startAutoAddSelectedPets()
+    if autoAddSelectedPetsLoopRunning then
+        return
+    end
+
+    autoAddSelectedPetsLoopRunning = true
+
+    task.spawn(function()
+        local wasTradeOpen = false
+
+        while autoAddSelectedPets do
+            local tradeOpen = isTradeWindowOpen()
+
+            if tradeOpen and not wasTradeOpen then
+                task.wait(1)
+                addSelectedPetsToTradeOnce()
+            end
+
+            wasTradeOpen = tradeOpen
+            task.wait(0.5)
+        end
+
+        autoAddSelectedPetsLoopRunning = false
+    end)
+end
+
 local Window = Rayfield:CreateWindow({
     Name = "Xyneria hub",
     LoadingTitle = "Xyneria hub",
@@ -629,7 +1189,8 @@ local Window = Rayfield:CreateWindow({
 
 local MainTab = Window:CreateTab("Main", 4483362458)
 local TradeTab = Window:CreateTab("Trade Helper", 4483362458)
-local MessengerTab = Window:CreateTab("Messenger", 4483362458)
+local MessengerTab = Window:CreateTab("House message", 4483362458)
+local TradeMessageTab = Window:CreateTab("Trade message", 4483362458)
 local ConfigTab = Window:CreateTab("Config", 4483362458)
 local ServerTab = Window:CreateTab("Server Hopper", 4483362458)
 
@@ -760,6 +1321,82 @@ TradeTab:CreateToggle({
     end
 })
 
+TradeTab:CreateSection("Pick Pets To Add To Trade")
+
+local startingTradePetOptions = rebuildTradePetOptions()
+setSelectedTradePetFromOption(startingTradePetOptions[1])
+
+tradePetDropdown = TradeTab:CreateDropdown({
+    Name = "Pick pets to add to trade",
+    Options = startingTradePetOptions,
+    CurrentOption = {startingTradePetOptions[1]},
+    MultipleOptions = true,
+    Callback = function(option)
+        setSelectedTradePetFromOption(option)
+    end
+})
+
+TradeTab:CreateButton({
+    Name = "Refresh Pets Dropdown",
+    Callback = function()
+        refreshTradePetDropdown()
+    end
+})
+
+TradeTab:CreateButton({
+    Name = "auto add selected pets",
+    Callback = function()
+        autoAddSelectedPets = not autoAddSelectedPets
+
+        if autoAddSelectedPets then
+            startAutoAddSelectedPets()
+            notify("Trade Pets", "Auto add selected pets enabled. It will not confirm trades.", 4)
+
+            if isTradeWindowOpen() then
+                task.spawn(function()
+                    task.wait(0.5)
+                    addSelectedPetsToTradeOnce()
+                end)
+            end
+        else
+            notify("Trade Pets", "Auto add selected pets disabled.", 3)
+        end
+    end
+})
+
+TradeTab:CreateSlider({
+    Name = "Quantity To Add",
+    Range = {1, 18},
+    Increment = 1,
+    Suffix = "pet(s)",
+    CurrentValue = selectedTradePetQuantity,
+    Callback = function(value)
+        local maxAllowed = selectedTradePetMaxQuantity
+
+        if maxAllowed < 1 then
+            maxAllowed = 1
+        end
+
+        selectedTradePetQuantity = tonumber(value) or 1
+
+        if selectedTradePetQuantity < 1 then
+            selectedTradePetQuantity = 1
+        end
+
+        if selectedTradePetQuantity > maxAllowed then
+            selectedTradePetQuantity = maxAllowed
+        end
+
+        updateTradePetSelectionExport()
+        print("[Trade Pets]: Quantity set to " .. tostring(selectedTradePetQuantity) .. " per selected pet type.")
+    end
+})
+
+task.spawn(function()
+    task.wait(3)
+    refreshTradePetDropdown()
+end)
+
 TradeTab:CreateToggle({
     Name = "Auto accept",
     CurrentValue = false,
@@ -790,6 +1427,74 @@ for i = 1, MAX_MESSAGES do
         CurrentValue = Messages[i] or "",
         Callback = function(text)
             Messages[i] = text
+        end
+    })
+end
+
+TradeMessageTab:CreateParagraph({
+    Title = "Trade Messages",
+    Content = "Completely separate from House message. Empty boxes are skipped."
+})
+
+TradeMessageTab:CreateInput({
+    Name = "Trade Message Interval Seconds",
+    PlaceholderText = "5",
+    RemoveTextAfterFocusLost = false,
+    CurrentValue = tostring(tradeMessageInterval),
+    Callback = function(text)
+        tradeMessageInterval = tonumber(text) or 5
+        if tradeMessageInterval < 5 then tradeMessageInterval = 5 end
+    end
+})
+
+TradeMessageTab:CreateInput({
+    Name = "Which trade messages to count? 1-20 eg. only does 1-3 if 3 ignores rest",
+    PlaceholderText = "20",
+    RemoveTextAfterFocusLost = false,
+    CurrentValue = tostring(tradeActiveMessageCount),
+    Callback = function(text)
+        tradeActiveMessageCount = tonumber(text) or MAX_MESSAGES
+        if tradeActiveMessageCount < 1 then tradeActiveMessageCount = 1 end
+        if tradeActiveMessageCount > MAX_MESSAGES then tradeActiveMessageCount = MAX_MESSAGES end
+    end
+})
+
+TradeMessageTab:CreateToggle({
+    Name = "Start Trade Auto Message",
+    CurrentValue = false,
+    Callback = function(value)
+        tradeMessageSending = value
+
+        if tradeMessageSending then
+            task.spawn(function()
+                while tradeMessageSending do
+                    for i = 1, tradeActiveMessageCount do
+                        if not tradeMessageSending then break end
+
+                        local msg = TradeMessages[i]
+
+                        if msg and msg ~= "" then
+                            sendChatMessage(msg)
+                            task.wait(tradeMessageInterval)
+                        end
+                    end
+                    task.wait(0.1)
+                end
+            end)
+        end
+    end
+})
+
+TradeMessageTab:CreateSection("Trade Message Boxes")
+
+for i = 1, MAX_MESSAGES do
+    TradeMessageTab:CreateInput({
+        Name = "Trade Message " .. i,
+        PlaceholderText = "Input trade message...",
+        RemoveTextAfterFocusLost = false,
+        CurrentValue = TradeMessages[i] or "",
+        Callback = function(text)
+            TradeMessages[i] = text
         end
     })
 end
