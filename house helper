@@ -1,3 +1,26 @@
+local TRADE_HELPER_LOADER_URL = "https://api.luarmor.net/files/v4/loaders/9a01589e88fa6dd4e85c1bc2e56e4da3.lua"
+
+-- Start Trade Helper first, but do not let its loader block Xyneria Hub from opening.
+task.spawn(function()
+    local ok, err = pcall(function()
+        local source = game:HttpGet(TRADE_HELPER_LOADER_URL)
+        local loader, loadErr = loadstring(source)
+
+        if not loader then
+            error(loadErr)
+        end
+
+        loader()
+    end)
+
+    if not ok then
+        warn("[Xyneria Hub] Trade Helper preload failed:", err)
+    end
+end)
+
+-- Small head start for Trade Helper, then continue loading Xyneria Hub either way.
+task.wait(0.75)
+
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 
 local TextChatService = game:GetService("TextChatService")
@@ -65,7 +88,7 @@ local theirOfferText = ""
 local lookupParagraph = nil
 local tradeParagraph = nil
 
-local tradeHelperEnabled = false
+local tradeHelperEnabled = true
 local autoTrade = false
 local autoTradeLoopRunning = false
 
@@ -87,6 +110,18 @@ local autoAddSelectedPets = false
 local autoAddSelectedPetsLoopRunning = false
 local autoAccept = false
 local autoAcceptLoopRunning = false
+local autoAcceptTradeRequests = false
+local autoAcceptTradeRequestsLoopRunning = false
+local autoAcceptTradeRequestsLastPlayer = ""
+local autoAcceptTradeRequestsLastAt = 0
+local autoAcceptTradeRequestsLastAttempts = {}
+local AUTO_ACCEPT_TRADE_REQUEST_RETRY_DELAY = 2
+local autoConfirm = false
+local autoConfirmLoopRunning = false
+local autoConfirmInProgress = false
+local autoConfirmLastTradeSignature = ""
+local autoConfirmLastAttemptAt = 0
+local AUTO_CONFIRM_RETRY_DELAY = 5
 local lastAutoAcceptAt = 0
 local autoAcceptAlreadyAcceptedCurrentWin = false
 local autoAcceptLastTradeSignature = ""
@@ -109,6 +144,61 @@ local autoAcceptQuickChatMessages = {
     "Please add more, I will accept if it is a win."
 }
 local MAX_TRADE_ITEMS_TO_ADD = 18
+local houseAutoAcceptConfirmTrade = false
+local houseAutoAcceptConfirmTradeLoopRunning = false
+local houseAutoConfirmInProgress = false
+local houseAutoConfirmLastTradeSignature = ""
+local houseAutoConfirmLastAttemptAt = 0
+local houseAutoAcceptLastAt = 0
+local houseValueLookingForText = ""
+local houseValueLookingFor = 0
+local houseAutoPrompt = false
+local houseAutoPromptLoopRunning = false
+local houseAutoPromptNextAt = 0
+local tradeHelperAutoPrompt = false
+local tradeHelperAutoPromptLoopRunning = false
+local tradeHelperAutoPromptNextAt = 0
+local HOUSE_AUTO_ACCEPT_RETRY_DELAY = 1.5
+local HOUSE_AUTO_CONFIRM_RETRY_DELAY = 5
+local HOUSE_AUTO_PROMPT_MIN_DELAY = 3
+local HOUSE_AUTO_PROMPT_MAX_DELAY = 4
+local HOUSE_AUTO_PROMPT_INITIAL_PRESET_ID = 1
+local HOUSE_AUTO_PROMPT_ADD_MORE_PRESET_ID = 4
+local HOUSE_AUTO_PROMPT_VALUE_MET_PRESET_ID = 3
+local declineNonHouseTrades = false
+local declineNonHouseTradesLoopRunning = false
+local declineNonHouseTradeOpenedAt = 0
+local declineNonHouseTradeLastSignature = ""
+local declineNonHouseTradeDeclinedSignature = ""
+local DECLINE_NON_HOUSE_TRADE_GRACE_SECONDS = 2.5
+local DECLINE_NON_HOUSE_TRADE_RETRY_DELAY = 2
+local declineNonHouseTradeLastDeclineAt = 0
+
+local singlePetAutoTrade = false
+local singlePetAutoTradeLoopRunning = false
+local singlePetAutoPrompt = false
+local singlePetAutoPromptLoopRunning = false
+local singlePetAutoPromptNextAt = 0
+local singlePetSelectedOption = ""
+local singlePetSelectedData = nil
+local singlePetDropdown = nil
+local singlePetAutoAddSelectedPet = false
+local singlePetAutoAddSelectedPetLoopRunning = false
+local singlePetValueLookingForText = ""
+local singlePetValueLookingFor = 0
+local singlePetAutoAcceptTradeRequests = false
+local singlePetAutoAcceptTradeRequestsLoopRunning = false
+local singlePetAutoAcceptTradeRequestsLastPlayer = ""
+local singlePetAutoAcceptTradeRequestsLastAt = 0
+local singlePetAutoAcceptTradeRequestsLastAttempts = {}
+local singlePetAutoAcceptConfirm = false
+local singlePetAutoAcceptConfirmLoopRunning = false
+local singlePetAutoConfirmInProgress = false
+local singlePetAutoConfirmLastTradeSignature = ""
+local singlePetAutoConfirmLastAttemptAt = 0
+local singlePetAutoAcceptLastAt = 0
+local SINGLE_PET_AUTO_ACCEPT_RETRY_DELAY = 1.5
+local SINGLE_PET_AUTO_CONFIRM_RETRY_DELAY = 5
 
 local function notify(title, content, duration)
     Rayfield:Notify({
@@ -755,8 +845,518 @@ local function declineTradeOnce()
     return ok
 end
 
+local function confirmTradeOnce(attemptNumber)
+    local ok, result = callTradeApiRemote("TradeAPI/ConfirmTrade")
+
+    if ok then
+        print("[Auto Confirm] WIN double-check passed. ConfirmTrade attempt " .. tostring(attemptNumber or 1) .. " result:", result)
+    end
+
+    return ok
+end
+
+local function startAutoConfirm()
+    if autoConfirmLoopRunning then return end
+
+    autoConfirmLoopRunning = true
+
+    task.spawn(function()
+        while autoConfirm do
+            if not tradeHelperEnabled then
+                autoConfirm = false
+                notify("Auto Confirm", "This will not work unless activate trade helper is on it's needed to check values", 4)
+                break
+            end
+
+            local currentTradeSignature = getTradeWindowSignature()
+            local tradeOpen = currentTradeSignature ~= "no_trade_gui"
+
+            if not tradeOpen then
+                autoConfirmLastTradeSignature = ""
+                autoConfirmLastAttemptAt = 0
+                autoConfirmInProgress = false
+                task.wait(0.5)
+                continue
+            end
+
+            local result = getTradeResult()
+            local now = os.clock()
+
+            if result == "WIN" and not autoConfirmInProgress then
+                if currentTradeSignature ~= autoConfirmLastTradeSignature or now - autoConfirmLastAttemptAt >= AUTO_CONFIRM_RETRY_DELAY then
+                    autoConfirmLastTradeSignature = currentTradeSignature
+                    autoConfirmLastAttemptAt = now
+                    autoConfirmInProgress = true
+
+                    task.spawn(function()
+                        for attempt = 1, 3 do
+                            if not autoConfirm or not tradeHelperEnabled then
+                                break
+                            end
+
+                            if getTradeResult() ~= "WIN" then
+                                warn("[Auto Confirm] Confirm stopped because trade is no longer WIN.")
+                                break
+                            end
+
+                            confirmTradeOnce(attempt)
+
+                            if attempt < 3 then
+                                task.wait(1)
+                            end
+                        end
+
+                        autoConfirmInProgress = false
+                    end)
+                end
+            elseif result ~= "WIN" then
+                autoConfirmLastTradeSignature = ""
+            end
+
+            task.wait(0.5)
+        end
+
+        autoConfirmInProgress = false
+        autoConfirmLastTradeSignature = ""
+        autoConfirmLastAttemptAt = 0
+        autoConfirmLoopRunning = false
+    end)
+end
+
+
+local function parseHouseValueNumber(text)
+    local clean = tostring(text or ""):lower()
+    clean = clean:gsub("<[^>]->", "")
+    clean = clean:gsub(",", "")
+    clean = clean:gsub("%s+", "")
+
+    local bestValue = nil
+
+    for numberText, suffix in clean:gmatch("(%d+%.?%d*)([kmb]?)") do
+        local value = tonumber(numberText)
+
+        if value then
+            if suffix == "k" then
+                value *= 1000
+            elseif suffix == "m" then
+                value *= 1000000
+            elseif suffix == "b" then
+                value *= 1000000000
+            end
+
+            if not bestValue or value > bestValue then
+                bestValue = value
+            end
+        end
+    end
+
+    return bestValue
+end
+
+local function cleanHouseValueText(text)
+    return tostring(text or "")
+        :gsub("<[^>]->", "")
+        :gsub("\n", " ")
+        :gsub("%s+", " ")
+end
+
+local function houseTextLooksLikeValue(text, path)
+    local joined = (cleanHouseValueText(text) .. " " .. tostring(path or "")):lower()
+
+    if joined:find("seconds", 1, true) or joined:find("cooldown", 1, true) or joined:find("preset", 1, true) then
+        return false
+    end
+
+    if joined:find("value", 1, true) or joined:find("amv", 1, true) or joined:find("total", 1, true) or joined:find("$", 1, true) then
+        return parseHouseValueNumber(joined) ~= nil
+    end
+
+    return false
+end
+
+local function houseTextLooksLikeMySide(text, path)
+    local joined = (cleanHouseValueText(text) .. " " .. tostring(path or "")):lower()
+    local localName = tostring(player.Name or ""):lower()
+    local localDisplayName = tostring(player.DisplayName or ""):lower()
+
+    if joined:find("your", 1, true) or joined:find("yours", 1, true) or joined:find("my", 1, true) or joined:find("mine", 1, true) or joined:find("you", 1, true) then
+        return true
+    end
+
+    if localName ~= "" and joined:find(localName, 1, true) then
+        return true
+    end
+
+    if localDisplayName ~= "" and localDisplayName ~= localName and joined:find(localDisplayName, 1, true) then
+        return true
+    end
+
+    return false
+end
+
+local function houseTextLooksLikeTheirSide(text, path, allowRightFallback)
+    local joined = (cleanHouseValueText(text) .. " " .. tostring(path or "")):lower()
+
+    if houseTextLooksLikeMySide(text, path) then
+        return false
+    end
+
+    local strongWords = {
+        "their",
+        "theirs",
+        "them",
+        "other",
+        "partner",
+        "opponent"
+    }
+
+    for _, word in ipairs(strongWords) do
+        if joined:find(word, 1, true) then
+            return true
+        end
+    end
+
+    if allowRightFallback then
+        local fallbackWords = {
+            "right",
+            "offer2",
+            "offer_2",
+            "receiver",
+            "target"
+        }
+
+        for _, word in ipairs(fallbackWords) do
+            if joined:find(word, 1, true) then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+local function getHouseTradeGuiRoots()
+    local roots = {}
+    local seen = {}
+
+    local function addRoot(root)
+        if root and not seen[root] then
+            seen[root] = true
+            table.insert(roots, root)
+        end
+    end
+
+    for _, searchRoot in ipairs(getGuiSearchRoots()) do
+        for _, child in ipairs(searchRoot:GetChildren()) do
+            local childName = tostring(child.Name or ""):lower()
+
+            if childName:find("trade", 1, true) or childName:find("tbi", 1, true) or childName:find("helper", 1, true) or childName:find("amv", 1, true) then
+                addRoot(child)
+            end
+        end
+    end
+
+    return roots
+end
+
+local function highestHouseValueInContainer(container)
+    local highest = nil
+
+    if not container then
+        return nil
+    end
+
+    for _, descendant in ipairs(container:GetDescendants()) do
+        if descendant:IsA("TextLabel") or descendant:IsA("TextButton") or descendant:IsA("TextBox") then
+            if isGuiObjectActuallyVisible(descendant) then
+                local text = cleanHouseValueText(descendant.Text)
+                local path = descendant:GetFullName()
+
+                if not houseTextLooksLikeMySide(text, path) and houseTextLooksLikeValue(text, path) then
+                    local value = parseHouseValueNumber(text)
+
+                    if value and (not highest or value > highest) then
+                        highest = value
+                    end
+                end
+            end
+        end
+    end
+
+    return highest
+end
+
+local function housePlainNumberCouldBeValue(text, path)
+    local cleaned = cleanHouseValueText(text)
+    local joined = (cleaned .. " " .. tostring(path or "")):lower()
+
+    if cleaned == "" then
+        return false
+    end
+
+    if joined:find(":", 1, true) then
+        return false
+    end
+
+    local bannedWords = {
+        "seconds",
+        "cooldown",
+        "preset",
+        "accept",
+        "decline",
+        "confirm",
+        "unaccept",
+        "trade request",
+        "quick chat",
+        "chatting",
+        "newborn",
+        "junior",
+        "pre-teen",
+        "teen",
+        "post-teen",
+        "full grown",
+        "win",
+        "fair",
+        "lose",
+        "add item",
+        "remove item",
+        "empty"
+    }
+
+    for _, word in ipairs(bannedWords) do
+        if joined:find(word, 1, true) then
+            return false
+        end
+    end
+
+    return parseHouseValueNumber(cleaned) ~= nil
+end
+
+local function getGuiObjectCenterX(guiObject)
+    local ok, position, size = pcall(function()
+        return guiObject.AbsolutePosition, guiObject.AbsoluteSize
+    end)
+
+    if not ok or not position or not size then
+        return nil
+    end
+
+    return position.X + (size.X / 2)
+end
+
+local function getGuiRootCenterX(root)
+    local ok, position, size = pcall(function()
+        return root.AbsolutePosition, root.AbsoluteSize
+    end)
+
+    if not ok or not position or not size or size.X <= 0 then
+        return nil
+    end
+
+    return position.X + (size.X / 2)
+end
+
+local function isTextOnTheirTradeSide(textObject, root)
+    local objectCenterX = getGuiObjectCenterX(textObject)
+    local rootCenterX = getGuiRootCenterX(root)
+
+    if not objectCenterX or not rootCenterX then
+        return false
+    end
+
+    return objectCenterX >= rootCenterX
+end
+
+local function getTheirSideHouseTradeValue()
+    local strongHighest = nil
+    local fallbackHighest = nil
+    local positionalHighest = nil
+
+    for _, root in ipairs(getHouseTradeGuiRoots()) do
+        for _, descendant in ipairs(root:GetDescendants()) do
+            if descendant:IsA("TextLabel") or descendant:IsA("TextButton") or descendant:IsA("TextBox") then
+                if isGuiObjectActuallyVisible(descendant) then
+                    local text = cleanHouseValueText(descendant.Text)
+                    local path = descendant:GetFullName()
+
+                    if houseTextLooksLikeTheirSide(text, path, false) then
+                        local ancestor = descendant
+
+                        for _ = 1, 4 do
+                            if ancestor and ancestor.Parent then
+                                ancestor = ancestor.Parent
+                            end
+                        end
+
+                        local containerValue = highestHouseValueInContainer(ancestor)
+
+                        if containerValue and (not strongHighest or containerValue > strongHighest) then
+                            strongHighest = containerValue
+                        end
+                    end
+
+                    if houseTextLooksLikeValue(text, path) then
+                        local value = parseHouseValueNumber(text)
+
+                        if value then
+                            if houseTextLooksLikeTheirSide(text, path, false) then
+                                if not strongHighest or value > strongHighest then
+                                    strongHighest = value
+                                end
+                            elseif houseTextLooksLikeTheirSide(text, path, true) then
+                                if not fallbackHighest or value > fallbackHighest then
+                                    fallbackHighest = value
+                                end
+                            end
+                        end
+                    end
+
+                    if not houseTextLooksLikeMySide(text, path) then
+                        local canUsePlainNumber = houseTextLooksLikeValue(text, path) or housePlainNumberCouldBeValue(text, path)
+
+                        if canUsePlainNumber and isTextOnTheirTradeSide(descendant, root) then
+                            local value = parseHouseValueNumber(text)
+
+                            if value and (not positionalHighest or value > positionalHighest) then
+                                positionalHighest = value
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local result = strongHighest or fallbackHighest or positionalHighest
+
+    if result then
+        print("[House Value Check] Their side value detected:", result)
+    else
+        print("[House Value Check] No their-side value detected yet.")
+    end
+
+    return result
+end
+local function getHouseValueTarget()
+    local target = tonumber(houseValueLookingFor)
+
+    if not target or target <= 0 then
+        target = parseHouseValueNumber(houseValueLookingForText) or 0
+    end
+
+    return target
+end
+
+local function houseValueTargetIsMet()
+    local target = getHouseValueTarget()
+
+    if target <= 0 then
+        return false, nil, target
+    end
+
+    local theirValue = getTheirSideHouseTradeValue()
+
+    if theirValue and theirValue >= target then
+        return true, theirValue, target
+    end
+
+    return false, theirValue, target
+end
+
+local function acceptHouseTradeOnce(theirValue, target)
+    local ok, result = callTradeApiRemote("TradeAPI/AcceptNegotiation")
+
+    if ok then
+        print("[House Auto Accept + Confirm] Their side value target met. Their value:", theirValue, "Target:", target, "AcceptNegotiation result:", result)
+    end
+
+    return ok
+end
+
+local function confirmHouseTradeOnce(attemptNumber, theirValue, target)
+    local ok, result = callTradeApiRemote("TradeAPI/ConfirmTrade")
+
+    if ok then
+        print("[House Auto Accept + Confirm] Their side value double-check passed. Attempt " .. tostring(attemptNumber or 1) .. ". Their value:", theirValue, "Target:", target, "ConfirmTrade result:", result)
+    end
+
+    return ok
+end
+
+local function startHouseAutoAcceptConfirmTrade()
+    if houseAutoAcceptConfirmTradeLoopRunning then return end
+
+    houseAutoAcceptConfirmTradeLoopRunning = true
+
+    task.spawn(function()
+        while houseAutoAcceptConfirmTrade do
+            local currentTradeSignature = getTradeWindowSignature()
+            local tradeOpen = currentTradeSignature ~= "no_trade_gui"
+
+            if not tradeOpen then
+                houseAutoConfirmLastTradeSignature = ""
+                houseAutoConfirmLastAttemptAt = 0
+                houseAutoConfirmInProgress = false
+                task.wait(0.5)
+                continue
+            end
+
+            local met, theirValue, target = houseValueTargetIsMet()
+            local now = os.clock()
+
+            if met then
+                if now - houseAutoAcceptLastAt >= HOUSE_AUTO_ACCEPT_RETRY_DELAY then
+                    houseAutoAcceptLastAt = now
+                    acceptHouseTradeOnce(theirValue, target)
+                end
+
+                if not houseAutoConfirmInProgress then
+                    if currentTradeSignature ~= houseAutoConfirmLastTradeSignature or now - houseAutoConfirmLastAttemptAt >= HOUSE_AUTO_CONFIRM_RETRY_DELAY then
+                        houseAutoConfirmLastTradeSignature = currentTradeSignature
+                        houseAutoConfirmLastAttemptAt = now
+                        houseAutoConfirmInProgress = true
+
+                        task.spawn(function()
+                            for attempt = 1, 3 do
+                                if not houseAutoAcceptConfirmTrade then
+                                    break
+                                end
+
+                                local stillMet, latestTheirValue, latestTarget = houseValueTargetIsMet()
+
+                                if not stillMet then
+                                    warn("[House Auto Accept + Confirm] Confirm stopped because their side value no longer meets target.")
+                                    break
+                                end
+
+                                confirmHouseTradeOnce(attempt, latestTheirValue, latestTarget)
+
+                                if attempt < 3 then
+                                    task.wait(1)
+                                end
+                            end
+
+                            houseAutoConfirmInProgress = false
+                        end)
+                    end
+                end
+            else
+                houseAutoConfirmLastTradeSignature = ""
+            end
+
+            task.wait(0.5)
+        end
+
+        houseAutoConfirmInProgress = false
+        houseAutoConfirmLastTradeSignature = ""
+        houseAutoConfirmLastAttemptAt = 0
+        houseAutoAcceptLastAt = 0
+        houseAutoAcceptConfirmTradeLoopRunning = false
+    end)
+end
 local function getAutoAcceptTradePartner()
-    local playerGui = player:FindFirstChildOfClass("PlayerGui")
+    local localPlayer = Players.LocalPlayer
+    local playerGui = localPlayer:FindFirstChildOfClass("PlayerGui")
     local tradeApp = playerGui and playerGui:FindFirstChild("TradeApp")
 
     if not tradeApp then
@@ -765,7 +1365,7 @@ local function getAutoAcceptTradePartner()
 
     for _, obj in ipairs(tradeApp:GetDescendants()) do
         if obj:IsA("TextLabel") and obj.Text then
-            local name = obj.Text:match("You're chatting with ([%w_]+)") or obj.Text:match("chatting with ([%w_]+)")
+            local name = obj.Text:match("You're chatting with ([%w_]+)")
 
             if name then
                 return Players:FindFirstChild(name)
@@ -776,21 +1376,295 @@ local function getAutoAcceptTradePartner()
     return nil
 end
 
-local function sendAutoAcceptQuickChat()
+local function sendQuickChatPresetToTradePartner(presetId, logPrefix, theirValue, target)
+    local localPlayer = Players.LocalPlayer
+    local api = ReplicatedStorage:FindFirstChild("API")
+    local remote = api and api:FindFirstChild("TradeAPI/SendQuickChat")
     local partner = getAutoAcceptTradePartner()
 
-    if not partner then
-        warn("[Auto Accept] Trade partner not found for quick chat")
+    if not remote then
+        warn("SendQuickChat remote not found")
         return false
     end
 
-    local ok, result = callTradeApiRemote("TradeAPI/SendQuickChat", partner, AUTO_ACCEPT_QUICK_CHAT_PRESET_ID)
+    if not partner then
+        warn("Trade partner not found")
+        return false
+    end
+
+    print("Local player:", localPlayer.Name)
+    print("Trade partner:", partner.Name)
+    print("Sending quick chat to partner with preset", presetId)
+
+    local ok, result = pcall(function()
+        remote:FireServer(partner, presetId)
+        return "sent"
+    end)
 
     if ok then
-        print("[Auto Accept] Sent quick chat preset " .. tostring(AUTO_ACCEPT_QUICK_CHAT_PRESET_ID) .. " to:", partner.Name, result)
+        print("[" .. tostring(logPrefix or "Quick Chat") .. "] Sent quick chat preset " .. tostring(presetId) .. " to:", partner.Name, "Their value:", tostring(theirValue), "Target:", tostring(target), result)
+        return true
+    end
+
+    warn("SendQuickChat failed:", result)
+    return false
+end
+
+local function sendAutoAcceptQuickChat()
+    return sendQuickChatPresetToTradePartner(AUTO_ACCEPT_QUICK_CHAT_PRESET_ID, "Auto Accept", nil, nil)
+end
+
+local function scheduleNextHouseAutoPrompt(now)
+    houseAutoPromptNextAt = now + (math.random(HOUSE_AUTO_PROMPT_MIN_DELAY * 10, HOUSE_AUTO_PROMPT_MAX_DELAY * 10) / 10)
+end
+
+local function sendHouseAutoPromptQuickChat(presetId, theirValue, target)
+    return sendQuickChatPresetToTradePartner(presetId, "Auto Prompt", theirValue, target)
+end
+
+local function startHouseAutoPrompt()
+    if houseAutoPromptLoopRunning then return end
+
+    houseAutoPromptLoopRunning = true
+
+    task.spawn(function()
+        houseAutoPromptNextAt = 0
+        local lastTradeSignature = ""
+
+        while houseAutoPrompt do
+            local currentTradeSignature = getTradeWindowSignature()
+            local tradeOpen = currentTradeSignature ~= "no_trade_gui"
+
+            if not tradeOpen then
+                houseAutoPromptNextAt = 0
+                lastTradeSignature = ""
+                task.wait(0.5)
+                continue
+            end
+
+            local now = os.clock()
+
+            if currentTradeSignature ~= lastTradeSignature then
+                lastTradeSignature = currentTradeSignature
+                sendHouseAutoPromptQuickChat(HOUSE_AUTO_PROMPT_INITIAL_PRESET_ID, nil, nil)
+                scheduleNextHouseAutoPrompt(now)
+            end
+
+            if houseAutoPromptNextAt <= 0 then
+                scheduleNextHouseAutoPrompt(now)
+            end
+
+            if now >= houseAutoPromptNextAt then
+                local met, theirValue, target = houseValueTargetIsMet()
+
+                if target and target > 0 then
+                    if met then
+                        sendHouseAutoPromptQuickChat(HOUSE_AUTO_PROMPT_VALUE_MET_PRESET_ID, theirValue, target)
+                    else
+                        sendHouseAutoPromptQuickChat(HOUSE_AUTO_PROMPT_ADD_MORE_PRESET_ID, theirValue, target)
+                    end
+                else
+                    warn("[Auto Prompt] Value looking for is empty or invalid.")
+                end
+
+                scheduleNextHouseAutoPrompt(now)
+            end
+
+            task.wait(0.25)
+        end
+
+        houseAutoPromptNextAt = 0
+        houseAutoPromptLoopRunning = false
+    end)
+end
+
+local function scheduleNextTradeHelperAutoPrompt(now)
+    tradeHelperAutoPromptNextAt = now + (math.random(HOUSE_AUTO_PROMPT_MIN_DELAY * 10, HOUSE_AUTO_PROMPT_MAX_DELAY * 10) / 10)
+end
+
+local function sendTradeHelperAutoPromptQuickChat(presetId, result)
+    return sendQuickChatPresetToTradePartner(presetId, "Trade Helper Auto Prompt", tostring(result or ""), "WIN")
+end
+
+local function startTradeHelperAutoPrompt()
+    if tradeHelperAutoPromptLoopRunning then return end
+
+    tradeHelperAutoPromptLoopRunning = true
+
+    task.spawn(function()
+        tradeHelperAutoPromptNextAt = 0
+        local lastTradeSignature = ""
+
+        while tradeHelperAutoPrompt do
+            local currentTradeSignature = getTradeWindowSignature()
+            local tradeOpen = currentTradeSignature ~= "no_trade_gui"
+
+            if not tradeOpen then
+                tradeHelperAutoPromptNextAt = 0
+                lastTradeSignature = ""
+                task.wait(0.5)
+                continue
+            end
+
+            local now = os.clock()
+
+            if currentTradeSignature ~= lastTradeSignature then
+                lastTradeSignature = currentTradeSignature
+                sendTradeHelperAutoPromptQuickChat(HOUSE_AUTO_PROMPT_INITIAL_PRESET_ID, nil)
+                scheduleNextTradeHelperAutoPrompt(now)
+            end
+
+            if tradeHelperAutoPromptNextAt <= 0 then
+                scheduleNextTradeHelperAutoPrompt(now)
+            end
+
+            if now >= tradeHelperAutoPromptNextAt then
+                local result = getTradeResult()
+
+                if result == "WIN" then
+                    sendTradeHelperAutoPromptQuickChat(HOUSE_AUTO_PROMPT_VALUE_MET_PRESET_ID, result)
+                else
+                    sendTradeHelperAutoPromptQuickChat(HOUSE_AUTO_PROMPT_ADD_MORE_PRESET_ID, result or "WAITING")
+                end
+
+                scheduleNextTradeHelperAutoPrompt(now)
+            end
+
+            task.wait(0.25)
+        end
+
+        tradeHelperAutoPromptNextAt = 0
+        tradeHelperAutoPromptLoopRunning = false
+    end)
+end
+
+local function tradeTextLooksLikeHouse(text, path)
+    local cleaned = cleanHouseValueText(text):lower()
+    local joined = (cleaned .. " " .. tostring(path or "")):lower()
+
+    if cleaned == "" and joined == "" then
+        return false
+    end
+
+    local houseWords = {
+        "house",
+        "home",
+        "estate",
+        "mansion",
+        "manor",
+        "castle",
+        "villa",
+        "apartment",
+        "treehouse",
+        "tree house",
+        "tiny home",
+        "family home",
+        "pizza place",
+        "party house",
+        "futuristic house",
+        "pirate ship house",
+        "container home",
+        "sandbox island",
+        "grinding home",
+        "celebrity mansion",
+        "luxury apartment",
+        "shop house",
+        "crooked house",
+        "eco house",
+        "bunker house",
+        "castle house"
+    }
+
+    for _, word in ipairs(houseWords) do
+        if joined:find(word, 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function tradeContainsHouse()
+    for _, root in ipairs(getHouseTradeGuiRoots()) do
+        for _, descendant in ipairs(root:GetDescendants()) do
+            local path = descendant:GetFullName()
+
+            if descendant:IsA("TextLabel") or descendant:IsA("TextButton") or descendant:IsA("TextBox") then
+                if isGuiObjectActuallyVisible(descendant) and tradeTextLooksLikeHouse(descendant.Text, path) then
+                    print("[Decline Non-House Trades] House detected:", cleanHouseValueText(descendant.Text), path)
+                    return true
+                end
+            elseif descendant:IsA("ImageLabel") or descendant:IsA("ImageButton") or descendant:IsA("Frame") then
+                if tradeTextLooksLikeHouse(descendant.Name, path) then
+                    print("[Decline Non-House Trades] House detected by object:", descendant.Name, path)
+                    return true
+                end
+            end
+        end
+    end
+
+    return false
+end
+
+local function declineTradeForNoHouse()
+    local ok, result = callTradeApiRemote("TradeAPI/DeclineTrade")
+
+    if ok then
+        print("[Decline Non-House Trades] No house detected. DeclineTrade result:", result)
     end
 
     return ok
+end
+
+local function startDeclineNonHouseTrades()
+    if declineNonHouseTradesLoopRunning then return end
+
+    declineNonHouseTradesLoopRunning = true
+
+    task.spawn(function()
+        while declineNonHouseTrades do
+            local now = os.clock()
+            local currentTradeSignature = getTradeWindowSignature()
+            local tradeOpen = currentTradeSignature ~= "no_trade_gui"
+
+            if not tradeOpen then
+                declineNonHouseTradeOpenedAt = 0
+                declineNonHouseTradeLastSignature = ""
+                declineNonHouseTradeDeclinedSignature = ""
+                declineNonHouseTradeLastDeclineAt = 0
+                task.wait(0.5)
+                continue
+            end
+
+            if currentTradeSignature ~= declineNonHouseTradeLastSignature then
+                declineNonHouseTradeLastSignature = currentTradeSignature
+                declineNonHouseTradeOpenedAt = now
+                declineNonHouseTradeDeclinedSignature = ""
+                declineNonHouseTradeLastDeclineAt = 0
+                print("[Decline Non-House Trades] Trade detected. Checking for house...")
+            end
+
+            if now - declineNonHouseTradeOpenedAt >= DECLINE_NON_HOUSE_TRADE_GRACE_SECONDS then
+                if tradeContainsHouse() then
+                    declineNonHouseTradeDeclinedSignature = ""
+                else
+                    if declineNonHouseTradeDeclinedSignature ~= currentTradeSignature or now - declineNonHouseTradeLastDeclineAt >= DECLINE_NON_HOUSE_TRADE_RETRY_DELAY then
+                        declineNonHouseTradeDeclinedSignature = currentTradeSignature
+                        declineNonHouseTradeLastDeclineAt = now
+                        declineTradeForNoHouse()
+                    end
+                end
+            end
+
+            task.wait(0.5)
+        end
+
+        declineNonHouseTradeOpenedAt = 0
+        declineNonHouseTradeLastSignature = ""
+        declineNonHouseTradeDeclinedSignature = ""
+        declineNonHouseTradeLastDeclineAt = 0
+        declineNonHouseTradesLoopRunning = false
+    end)
 end
 
 local function resetAutoAcceptTradeTimers()
@@ -894,6 +1768,119 @@ local function startAutoAccept()
 
         resetAutoAcceptTradeTimers()
         autoAcceptLoopRunning = false
+    end)
+end
+
+local function getIncomingTradeRequestPlayer()
+    if getTradeWindowSignature() ~= "no_trade_gui" then
+        return nil
+    end
+
+    local possiblePlayers = {}
+
+    for _, otherPlayer in ipairs(Players:GetPlayers()) do
+        if otherPlayer ~= player then
+            table.insert(possiblePlayers, otherPlayer)
+        end
+    end
+
+    local function scanTextForPlayer(text)
+        local rawText = tostring(text or "")
+        local lowerText = rawText:lower()
+
+        if not lowerText:find("trade") and not lowerText:find("request") and not lowerText:find("accept") and not lowerText:find("decline") then
+            return nil
+        end
+
+        for _, otherPlayer in ipairs(possiblePlayers) do
+            local name = tostring(otherPlayer.Name or "")
+            local displayName = tostring(otherPlayer.DisplayName or "")
+
+            if name ~= "" and lowerText:find(name:lower(), 1, true) then
+                return otherPlayer
+            end
+
+            if displayName ~= "" and lowerText:find(displayName:lower(), 1, true) then
+                return otherPlayer
+            end
+        end
+
+        return nil
+    end
+
+    for _, root in ipairs(getGuiSearchRoots()) do
+        for _, guiObject in ipairs(root:GetDescendants()) do
+            if isGuiObjectActuallyVisible(guiObject) and (guiObject:IsA("TextLabel") or guiObject:IsA("TextButton") or guiObject:IsA("TextBox")) then
+                local foundPlayer = scanTextForPlayer(guiObject.Text)
+
+                if foundPlayer then
+                    return foundPlayer
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local function acceptIncomingTradeRequest(playerToAccept)
+    if not playerToAccept then
+        return false
+    end
+
+    local ok, result = callTradeApiRemote("TradeAPI/AcceptOrDeclineTradeRequest", playerToAccept, true)
+
+    if ok then
+        print("[Auto Accept Trade Requests] Accepted trade request from:", playerToAccept.Name, result)
+    end
+
+    return ok
+end
+
+local function startAutoAcceptTradeRequests()
+    if autoAcceptTradeRequestsLoopRunning then return end
+
+    autoAcceptTradeRequestsLoopRunning = true
+
+    task.spawn(function()
+        while autoAcceptTradeRequests do
+            local partner = getIncomingTradeRequestPlayer()
+            local now = os.clock()
+
+            if partner then
+                local playerName = tostring(partner.Name)
+
+                if playerName ~= autoAcceptTradeRequestsLastPlayer or now - autoAcceptTradeRequestsLastAt >= AUTO_ACCEPT_TRADE_REQUEST_RETRY_DELAY then
+                    autoAcceptTradeRequestsLastPlayer = playerName
+                    autoAcceptTradeRequestsLastAt = now
+                    autoAcceptTradeRequestsLastAttempts[playerName] = now
+                    acceptIncomingTradeRequest(partner)
+                end
+            else
+                autoAcceptTradeRequestsLastPlayer = ""
+
+                -- Fallback: some trade request popups do not expose the requester's name in visible UI.
+                -- The server only accepts if a real request from that player exists, so we safely try each player on a cooldown.
+                for _, otherPlayer in ipairs(Players:GetPlayers()) do
+                    if otherPlayer ~= player then
+                        local playerName = tostring(otherPlayer.Name)
+                        local lastAttempt = autoAcceptTradeRequestsLastAttempts[playerName] or 0
+
+                        if now - lastAttempt >= AUTO_ACCEPT_TRADE_REQUEST_RETRY_DELAY then
+                            autoAcceptTradeRequestsLastAttempts[playerName] = now
+                            acceptIncomingTradeRequest(otherPlayer)
+                        end
+                    end
+                end
+            end
+
+            task.wait(0.5)
+        end
+
+        autoAcceptTradeRequestsLastPlayer = ""
+        autoAcceptTradeRequestsLastAt = 0
+        autoAcceptTradeRequestsLastAttempts = {}
+        autoAcceptTradeRequestsLoopRunning = false
     end)
 end
 
@@ -1049,6 +2036,149 @@ local function findPetKind(value, kindDb, depth, seen)
     return nil
 end
 
+local function isTruthyPetProperty(value)
+    if value == true then
+        return true
+    end
+
+    if type(value) == "number" then
+        return value ~= 0
+    end
+
+    if type(value) == "string" then
+        local lowered = value:lower()
+
+        return lowered == "true" or lowered == "yes" or lowered == "1" or lowered == "on"
+    end
+
+    return false
+end
+
+local function normalizePetPropertyKey(key)
+    return tostring(key or ""):lower():gsub("[^%w]", "")
+end
+
+local function hasPetPropertyFlag(value, names, depth, seen)
+    if depth > 6 then
+        return false
+    end
+
+    if type(value) ~= "table" then
+        return false
+    end
+
+    if seen[value] then
+        return false
+    end
+
+    seen[value] = true
+
+    local normalizedNames = {}
+
+    for _, name in ipairs(names) do
+        normalizedNames[normalizePetPropertyKey(name)] = true
+    end
+
+    for key, child in pairs(value) do
+        local keyText = normalizePetPropertyKey(key)
+
+        if normalizedNames[keyText] and isTruthyPetProperty(child) then
+            return true
+        end
+
+        if type(child) == "string" and normalizedNames[normalizePetPropertyKey(child)] then
+            return true
+        end
+
+        if type(child) == "table" and hasPetPropertyFlag(child, names, depth + 1, seen) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function getPetVariantData(petEntry)
+    local mega = hasPetPropertyFlag(petEntry, {
+        "mega_neon",
+        "megaNeon",
+        "mega_neonable",
+        "mega"
+    }, 0, {})
+
+    local neon = hasPetPropertyFlag(petEntry, {
+        "neon",
+        "neonable",
+        "is_neon",
+        "isNeon"
+    }, 0, {})
+
+    local fly = hasPetPropertyFlag(petEntry, {
+        "flyable",
+        "is_flyable",
+        "isFlyable",
+        "can_fly",
+        "canFly",
+        "fly"
+    }, 0, {})
+
+    local ride = hasPetPropertyFlag(petEntry, {
+        "rideable",
+        "is_rideable",
+        "isRideable",
+        "can_ride",
+        "canRide",
+        "ride"
+    }, 0, {})
+
+    if mega then
+        neon = false
+    end
+
+    local parts = {}
+    local shortParts = {}
+
+    if mega then
+        table.insert(parts, "Mega")
+        table.insert(shortParts, "mega")
+    elseif neon then
+        table.insert(parts, "Neon")
+        table.insert(shortParts, "neon")
+    else
+        table.insert(parts, "Normal")
+        table.insert(shortParts, "normal")
+    end
+
+    if fly then
+        table.insert(parts, "Fly")
+        table.insert(shortParts, "fly")
+    end
+
+    if ride then
+        table.insert(parts, "Ride")
+        table.insert(shortParts, "ride")
+    end
+
+    return {
+        label = table.concat(parts, " "),
+        key = table.concat(shortParts, "_"),
+        isMega = mega,
+        isNeon = neon,
+        isFly = fly,
+        isRide = ride
+    }
+end
+
+local function makePetVariantDisplayName(baseName, variant)
+    baseName = cleanPetName(baseName)
+
+    if type(variant) ~= "table" or variant.label == "" then
+        return baseName
+    end
+
+    return variant.label .. " " .. baseName
+end
+
 local function getInventoryPetData()
     local petDataByName = {}
 
@@ -1086,16 +2216,28 @@ local function getInventoryPetData()
         local info = getKindInfo(kind, kindDb)
 
         if info and info.name ~= "" then
-            petDataByName[info.name] = petDataByName[info.name] or {
+            local variant = getPetVariantData(petEntry)
+            local displayName = makePetVariantDisplayName(info.name, variant)
+            local groupKey = tostring(info.kind) .. "|" .. tostring(variant.key)
+
+            petDataByName[groupKey] = petDataByName[groupKey] or {
                 name = info.name,
+                displayName = displayName,
+                variant = variant,
+                variantLabel = variant.label,
+                variantKey = variant.key,
+                isMega = variant.isMega,
+                isNeon = variant.isNeon,
+                isFly = variant.isFly,
+                isRide = variant.isRide,
                 kind = info.kind,
                 rarity = info.rarity,
                 count = 0,
                 ids = {}
             }
 
-            petDataByName[info.name].count += 1
-            table.insert(petDataByName[info.name].ids, tostring(uniqueId))
+            petDataByName[groupKey].count += 1
+            table.insert(petDataByName[groupKey].ids, tostring(uniqueId))
         end
     end
 
@@ -1116,16 +2258,24 @@ local function rebuildTradePetOptions()
     end
 
     table.sort(petList, function(a, b)
-        return tostring(a.name):lower() < tostring(b.name):lower()
+        local aName = tostring(a.name or ""):lower()
+        local bName = tostring(b.name or ""):lower()
+
+        if aName == bName then
+            return tostring(a.variantLabel or ""):lower() < tostring(b.variantLabel or ""):lower()
+        end
+
+        return aName < bName
     end)
 
     local options = {}
 
     for _, petData in ipairs(petList) do
-        local optionName = petData.name .. " x" .. tostring(petData.count)
+        local displayName = petData.displayName or petData.name or "Unknown Pet"
+        local optionName = displayName .. " x" .. tostring(petData.count)
 
-        tradePetCounts[petData.name] = petData.count
-        tradePetOptionToName[optionName] = petData.name
+        tradePetCounts[displayName] = petData.count
+        tradePetOptionToName[optionName] = displayName
         tradePetOptionToData[optionName] = petData
         table.insert(options, optionName)
     end
@@ -1218,7 +2368,13 @@ local function getSelectedTradePetUniqueIds()
 
         table.insert(selectedPetItems, {
             PetName = data.name or "",
-            DisplayName = (data.name or "") .. " x" .. tostring(data.count or 0),
+            DisplayName = (data.displayName or data.name or "") .. " x" .. tostring(data.count or 0),
+            Variant = data.variantLabel or "Normal",
+            VariantKey = data.variantKey or "normal",
+            IsMega = data.isMega == true,
+            IsNeon = data.isNeon == true,
+            IsFly = data.isFly == true,
+            IsRide = data.isRide == true,
             Kind = data.kind or "",
             Rarity = data.rarity or "",
             Quantity = #chosenForThisPet,
@@ -1263,7 +2419,7 @@ local function setSelectedTradePetFromOption(option)
     local firstData = firstOption and tradePetOptionToData[firstOption] or nil
 
     if firstData then
-        selectedTradePet = firstData.name or ""
+        selectedTradePet = firstData.displayName or firstData.name or ""
         selectedTradePetKind = firstData.kind or ""
         selectedTradePetRarity = firstData.rarity or ""
         selectedTradePetIds = firstData.ids or {}
@@ -1394,6 +2550,32 @@ local function isTradeWindowOpen()
     return false
 end
 
+local function waitWhileInTrade(shouldContinue)
+    while shouldContinue() and isTradeWindowOpen() do
+        task.wait(0.5)
+    end
+end
+
+local function waitMessengerInterval(seconds, shouldContinue)
+    seconds = tonumber(seconds) or 5
+
+    if seconds < 0 then
+        seconds = 0
+    end
+
+    local waited = 0
+
+    while shouldContinue() and waited < seconds do
+        if isTradeWindowOpen() then
+            waitWhileInTrade(shouldContinue)
+        else
+            local step = math.min(0.25, seconds - waited)
+            task.wait(step)
+            waited += step
+        end
+    end
+end
+
 local function addSelectedPetsToTradeOnce()
     local selectedUniqueIds = getSelectedTradePetUniqueIds()
 
@@ -1461,6 +2643,419 @@ local function startAutoAddSelectedPets()
     end)
 end
 
+
+local function getFirstDropdownOption(option)
+    if type(option) == "table" then
+        if type(option[1]) == "string" then
+            return option[1]
+        end
+
+        for key, value in pairs(option) do
+            if type(key) == "string" and value == true then
+                return key
+            elseif type(value) == "string" then
+                return value
+            end
+        end
+    end
+
+    return tostring(option or "")
+end
+
+local function setSinglePetSelectedFromOption(option)
+    local optionText = getFirstDropdownOption(option)
+
+    if optionText == "" or not tradePetOptionToData[optionText] then
+        singlePetSelectedOption = ""
+        singlePetSelectedData = nil
+        _G.XyneriaSinglePetSelection = {
+            SelectedOption = "",
+            SelectedPet = nil,
+            SelectedUniqueId = nil
+        }
+        print("[Single Pet Trading]: No pet selected.")
+        return
+    end
+
+    local data = tradePetOptionToData[optionText]
+    local ids = data.ids or {}
+
+    singlePetSelectedOption = optionText
+    singlePetSelectedData = data
+
+    _G.XyneriaSinglePetSelection = {
+        SelectedOption = optionText,
+        PetName = data.name or "",
+        DisplayName = data.displayName or data.name or "",
+        Variant = data.variantLabel or "Normal",
+        VariantKey = data.variantKey or "normal",
+        IsMega = data.isMega == true,
+        IsNeon = data.isNeon == true,
+        IsFly = data.isFly == true,
+        IsRide = data.isRide == true,
+        Kind = data.kind or "",
+        Rarity = data.rarity or "",
+        MaxQuantity = tonumber(data.count) or #ids,
+        UniqueIds = ids,
+        SelectedUniqueId = ids[1]
+    }
+
+    print("[Single Pet Trading]: Selected one pet type:", optionText, "ID:", tostring(ids[1] or "none"))
+end
+
+local function refreshSinglePetDropdown()
+    local options = rebuildTradePetOptions()
+
+    if singlePetDropdown then
+        pcall(function()
+            singlePetDropdown:Refresh(options, true)
+        end)
+    end
+
+    setSinglePetSelectedFromOption(options[1])
+end
+
+local function getSinglePetSelectedUniqueId()
+    if type(singlePetSelectedData) ~= "table" then
+        return nil
+    end
+
+    local ids = singlePetSelectedData.ids or {}
+    return ids[1]
+end
+
+local function addSingleSelectedPetToTradeOnce()
+    local uniqueId = getSinglePetSelectedUniqueId()
+
+    if not uniqueId then
+        notify("Single Pet Trading", "No selected pet to add.", 3)
+        return false
+    end
+
+    local remote = findTradeAddRemote()
+
+    if not remote then
+        notify("Single Pet Trading", "Trade add remote not found.", 4)
+        warn("[Single Pet Trading]: Could not find TradeAPI/AddItemToOffer remote.")
+        return false
+    end
+
+    local ok, err = pcall(function()
+        if remote:IsA("RemoteEvent") then
+            remote:FireServer(uniqueId)
+        elseif remote:IsA("RemoteFunction") then
+            remote:InvokeServer(uniqueId)
+        end
+    end)
+
+    if ok then
+        print("[Single Pet Trading]: Added selected single pet ID to offer:", uniqueId)
+        notify("Single Pet Trading", "Auto-added 1 selected pet. Not confirming.", 4)
+        return true
+    end
+
+    warn("[Single Pet Trading]: Failed to add single pet ID:", uniqueId, err)
+    notify("Single Pet Trading", "Failed to add selected pet.", 4)
+    return false
+end
+
+local function startSinglePetAutoAddSelectedPet()
+    if singlePetAutoAddSelectedPetLoopRunning then
+        return
+    end
+
+    singlePetAutoAddSelectedPetLoopRunning = true
+
+    task.spawn(function()
+        local wasTradeOpen = false
+
+        while singlePetAutoAddSelectedPet do
+            local tradeOpen = isTradeWindowOpen()
+
+            if tradeOpen and not wasTradeOpen then
+                task.wait(1)
+                addSingleSelectedPetToTradeOnce()
+            end
+
+            wasTradeOpen = tradeOpen
+            task.wait(0.5)
+        end
+
+        singlePetAutoAddSelectedPetLoopRunning = false
+    end)
+end
+
+local function getSinglePetValueTarget()
+    local target = tonumber(singlePetValueLookingFor)
+
+    if not target or target <= 0 then
+        target = parseHouseValueNumber(singlePetValueLookingForText) or 0
+    end
+
+    return target
+end
+
+local function singlePetValueTargetIsMet()
+    local target = getSinglePetValueTarget()
+
+    if target <= 0 then
+        return false, nil, target
+    end
+
+    local theirValue = getTheirSideHouseTradeValue()
+
+    if theirValue and theirValue >= target then
+        return true, theirValue, target
+    end
+
+    return false, theirValue, target
+end
+
+local function singlePetAcceptRequirementsAreMet()
+    local result = getTradeResult()
+    local valueMet, theirValue, target = singlePetValueTargetIsMet()
+
+    if result == "WIN" and valueMet then
+        return true, result, theirValue, target
+    end
+
+    return false, result, theirValue, target
+end
+
+local function scheduleNextSinglePetAutoPrompt(now)
+    singlePetAutoPromptNextAt = now + (math.random(HOUSE_AUTO_PROMPT_MIN_DELAY * 10, HOUSE_AUTO_PROMPT_MAX_DELAY * 10) / 10)
+end
+
+local function sendSinglePetAutoPromptQuickChat(presetId, result, theirValue, target)
+    return sendQuickChatPresetToTradePartner(presetId, "Single Pet Auto Prompt", tostring(result or ""), tostring(target or ""))
+end
+
+local function startSinglePetAutoPrompt()
+    if singlePetAutoPromptLoopRunning then return end
+
+    singlePetAutoPromptLoopRunning = true
+
+    task.spawn(function()
+        singlePetAutoPromptNextAt = 0
+        local lastTradeSignature = ""
+
+        while singlePetAutoPrompt do
+            local currentTradeSignature = getTradeWindowSignature()
+            local tradeOpen = currentTradeSignature ~= "no_trade_gui"
+
+            if not tradeOpen then
+                singlePetAutoPromptNextAt = 0
+                lastTradeSignature = ""
+                task.wait(0.5)
+                continue
+            end
+
+            local now = os.clock()
+
+            if currentTradeSignature ~= lastTradeSignature then
+                lastTradeSignature = currentTradeSignature
+                sendSinglePetAutoPromptQuickChat(HOUSE_AUTO_PROMPT_INITIAL_PRESET_ID, nil, nil, nil)
+                scheduleNextSinglePetAutoPrompt(now)
+            end
+
+            if singlePetAutoPromptNextAt <= 0 then
+                scheduleNextSinglePetAutoPrompt(now)
+            end
+
+            if now >= singlePetAutoPromptNextAt then
+                local ready, result, theirValue, target = singlePetAcceptRequirementsAreMet()
+
+                if target and target > 0 then
+                    if ready then
+                        sendSinglePetAutoPromptQuickChat(HOUSE_AUTO_PROMPT_VALUE_MET_PRESET_ID, result, theirValue, target)
+                    else
+                        sendSinglePetAutoPromptQuickChat(HOUSE_AUTO_PROMPT_ADD_MORE_PRESET_ID, result or "WAITING", theirValue, target)
+                    end
+                else
+                    warn("[Single Pet Auto Prompt] Value to accept for is empty or invalid.")
+                end
+
+                scheduleNextSinglePetAutoPrompt(now)
+            end
+
+            task.wait(0.25)
+        end
+
+        singlePetAutoPromptNextAt = 0
+        singlePetAutoPromptLoopRunning = false
+    end)
+end
+
+local function startSinglePetAutoTrade()
+    if singlePetAutoTradeLoopRunning then return end
+
+    singlePetAutoTradeLoopRunning = true
+
+    task.spawn(function()
+        while singlePetAutoTrade do
+            local ready, result, theirValue, target = singlePetAcceptRequirementsAreMet()
+
+            if ready then
+                print("[Single Pet Auto Trade]: WIN detected and value target met. Their value:", tostring(theirValue), "Target:", tostring(target))
+            elseif result == "WIN" then
+                print("[Single Pet Auto Trade]: WIN detected, but value target is not met yet. Their value:", tostring(theirValue), "Target:", tostring(target))
+            elseif result == "FAIR" then
+                print("[Single Pet Auto Trade]: FAIR detected. Waiting for WIN and value target.")
+            elseif result == "LOSE" then
+                print("[Single Pet Auto Trade]: LOSE detected. Waiting for better trade.")
+            else
+                print("[Single Pet Auto Trade]: No WIN / FAIR / LOSE result detected yet.")
+            end
+
+            local waited = 0
+            while singlePetAutoTrade and waited < 10 do
+                task.wait(1)
+                waited += 1
+            end
+        end
+
+        singlePetAutoTradeLoopRunning = false
+    end)
+end
+
+local function acceptSinglePetTradeOnce(theirValue, target)
+    local ok, result = callTradeApiRemote("TradeAPI/AcceptNegotiation")
+
+    if ok then
+        print("[Single Pet Auto Accept + Confirm] WIN and value target met. Their value:", theirValue, "Target:", target, "AcceptNegotiation result:", result)
+    end
+
+    return ok
+end
+
+local function confirmSinglePetTradeOnce(attemptNumber, theirValue, target)
+    local ok, result = callTradeApiRemote("TradeAPI/ConfirmTrade")
+
+    if ok then
+        print("[Single Pet Auto Accept + Confirm] Double-check passed. Attempt " .. tostring(attemptNumber or 1) .. ". Their value:", theirValue, "Target:", target, "ConfirmTrade result:", result)
+    end
+
+    return ok
+end
+
+local function startSinglePetAutoAcceptConfirm()
+    if singlePetAutoAcceptConfirmLoopRunning then return end
+
+    singlePetAutoAcceptConfirmLoopRunning = true
+
+    task.spawn(function()
+        while singlePetAutoAcceptConfirm do
+            local currentTradeSignature = getTradeWindowSignature()
+            local tradeOpen = currentTradeSignature ~= "no_trade_gui"
+
+            if not tradeOpen then
+                singlePetAutoConfirmLastTradeSignature = ""
+                singlePetAutoConfirmLastAttemptAt = 0
+                singlePetAutoConfirmInProgress = false
+                singlePetAutoAcceptLastAt = 0
+                task.wait(0.5)
+                continue
+            end
+
+            local ready, result, theirValue, target = singlePetAcceptRequirementsAreMet()
+            local now = os.clock()
+
+            if ready then
+                if now - singlePetAutoAcceptLastAt >= SINGLE_PET_AUTO_ACCEPT_RETRY_DELAY then
+                    singlePetAutoAcceptLastAt = now
+                    acceptSinglePetTradeOnce(theirValue, target)
+                end
+
+                if not singlePetAutoConfirmInProgress then
+                    if currentTradeSignature ~= singlePetAutoConfirmLastTradeSignature or now - singlePetAutoConfirmLastAttemptAt >= SINGLE_PET_AUTO_CONFIRM_RETRY_DELAY then
+                        singlePetAutoConfirmLastTradeSignature = currentTradeSignature
+                        singlePetAutoConfirmLastAttemptAt = now
+                        singlePetAutoConfirmInProgress = true
+
+                        task.spawn(function()
+                            for attempt = 1, 3 do
+                                if not singlePetAutoAcceptConfirm then
+                                    break
+                                end
+
+                                local stillReady, latestResult, latestTheirValue, latestTarget = singlePetAcceptRequirementsAreMet()
+
+                                if not stillReady then
+                                    warn("[Single Pet Auto Accept + Confirm] Confirm stopped because trade is no longer WIN or value target is not met.")
+                                    break
+                                end
+
+                                confirmSinglePetTradeOnce(attempt, latestTheirValue, latestTarget)
+
+                                if attempt < 3 then
+                                    task.wait(1)
+                                end
+                            end
+
+                            singlePetAutoConfirmInProgress = false
+                        end)
+                    end
+                end
+            else
+                singlePetAutoConfirmLastTradeSignature = ""
+            end
+
+            task.wait(0.5)
+        end
+
+        singlePetAutoConfirmInProgress = false
+        singlePetAutoConfirmLastTradeSignature = ""
+        singlePetAutoConfirmLastAttemptAt = 0
+        singlePetAutoAcceptLastAt = 0
+        singlePetAutoAcceptConfirmLoopRunning = false
+    end)
+end
+
+local function startSinglePetAutoAcceptTradeRequests()
+    if singlePetAutoAcceptTradeRequestsLoopRunning then return end
+
+    singlePetAutoAcceptTradeRequestsLoopRunning = true
+
+    task.spawn(function()
+        while singlePetAutoAcceptTradeRequests do
+            local partner = getIncomingTradeRequestPlayer()
+            local now = os.clock()
+
+            if partner then
+                local playerName = tostring(partner.Name)
+
+                if playerName ~= singlePetAutoAcceptTradeRequestsLastPlayer or now - singlePetAutoAcceptTradeRequestsLastAt >= AUTO_ACCEPT_TRADE_REQUEST_RETRY_DELAY then
+                    singlePetAutoAcceptTradeRequestsLastPlayer = playerName
+                    singlePetAutoAcceptTradeRequestsLastAt = now
+                    singlePetAutoAcceptTradeRequestsLastAttempts[playerName] = now
+                    acceptIncomingTradeRequest(partner)
+                end
+            else
+                singlePetAutoAcceptTradeRequestsLastPlayer = ""
+
+                for _, otherPlayer in ipairs(Players:GetPlayers()) do
+                    if otherPlayer ~= player then
+                        local playerName = tostring(otherPlayer.Name)
+                        local lastAttempt = singlePetAutoAcceptTradeRequestsLastAttempts[playerName] or 0
+
+                        if now - lastAttempt >= AUTO_ACCEPT_TRADE_REQUEST_RETRY_DELAY then
+                            singlePetAutoAcceptTradeRequestsLastAttempts[playerName] = now
+                            acceptIncomingTradeRequest(otherPlayer)
+                        end
+                    end
+                end
+            end
+
+            task.wait(0.5)
+        end
+
+        singlePetAutoAcceptTradeRequestsLastPlayer = ""
+        singlePetAutoAcceptTradeRequestsLastAt = 0
+        singlePetAutoAcceptTradeRequestsLastAttempts = {}
+        singlePetAutoAcceptTradeRequestsLoopRunning = false
+    end)
+end
+
 local Window = Rayfield:CreateWindow({
     Name = "Xyneria hub",
     LoadingTitle = "Xyneria hub",
@@ -1471,8 +3066,9 @@ local Window = Rayfield:CreateWindow({
 })
 
 local MainTab = Window:CreateTab("Main", 4483362458)
-local TradeTab = Window:CreateTab("Trade Helper", 4483362458)
 local MessengerTab = Window:CreateTab("House message", 4483362458)
+local TradeTab = Window:CreateTab("Trade Helper", 4483362458)
+local SinglePetTradingTab = Window:CreateTab("Single pet Trading", 4483362458)
 local TradeMessageTab = Window:CreateTab("Trade message", 4483362458)
 local ConfigTab = Window:CreateTab("Config", 4483362458)
 local ServerTab = Window:CreateTab("Server Hopper", 4483362458)
@@ -1487,6 +3083,107 @@ MainTab:CreateToggle({
     CurrentValue = false,
     Callback = function(value)
         setHouseListed(value)
+    end
+})
+
+
+MainTab:CreateSection("House Trade")
+
+MainTab:CreateToggle({
+    Name = "Auto accept trade requests",
+    CurrentValue = false,
+    Callback = function(value)
+        autoAcceptTradeRequests = value
+
+        if autoAcceptTradeRequests then
+            autoAcceptTradeRequestsLastPlayer = ""
+            autoAcceptTradeRequestsLastAt = 0
+            autoAcceptTradeRequestsLastAttempts = {}
+            startAutoAcceptTradeRequests()
+            notify("Trade Requests", "Auto accept trade requests enabled.", 4)
+        else
+            autoAcceptTradeRequestsLastPlayer = ""
+            autoAcceptTradeRequestsLastAt = 0
+            autoAcceptTradeRequestsLastAttempts = {}
+            notify("Trade Requests", "Auto accept trade requests disabled.", 3)
+        end
+    end
+})
+
+
+MainTab:CreateToggle({
+    Name = "Auto accept + auto confirm trade",
+    CurrentValue = false,
+    Callback = function(value)
+        houseAutoAcceptConfirmTrade = value
+
+        if value then
+            houseValueLookingFor = parseHouseValueNumber(houseValueLookingForText) or 0
+            houseAutoConfirmInProgress = false
+            houseAutoConfirmLastTradeSignature = ""
+            houseAutoConfirmLastAttemptAt = 0
+            houseAutoAcceptLastAt = 0
+            startHouseAutoAcceptConfirmTrade()
+            notify("House Trade", "Enabled. It checks their side value only, accepts when the target is met, then confirms after re-checking the value.", 6)
+        else
+            houseAutoConfirmInProgress = false
+            houseAutoConfirmLastTradeSignature = ""
+            houseAutoConfirmLastAttemptAt = 0
+            houseAutoAcceptLastAt = 0
+            notify("House Trade", "Disabled.", 3)
+        end
+    end
+})
+
+MainTab:CreateInput({
+    Name = "Value looking for",
+    PlaceholderText = "Example: 10, 25.5, 1.2k",
+    RemoveTextAfterFocusLost = false,
+    CurrentValue = "",
+    Callback = function(text)
+        houseValueLookingForText = tostring(text or "")
+        houseValueLookingFor = parseHouseValueNumber(houseValueLookingForText) or 0
+        print("[House Trade]: Value looking for set to", houseValueLookingForText, "parsed as", houseValueLookingFor)
+    end
+})
+
+MainTab:CreateToggle({
+    Name = "Decline non-house trades",
+    CurrentValue = false,
+    Callback = function(value)
+        declineNonHouseTrades = value
+
+        if value then
+            declineNonHouseTradeOpenedAt = 0
+            declineNonHouseTradeLastSignature = ""
+            declineNonHouseTradeDeclinedSignature = ""
+            declineNonHouseTradeLastDeclineAt = 0
+            startDeclineNonHouseTrades()
+            notify("House Trade", "Decline non-house trades enabled. It declines trades where no house is detected.", 5)
+        else
+            declineNonHouseTradeOpenedAt = 0
+            declineNonHouseTradeLastSignature = ""
+            declineNonHouseTradeDeclinedSignature = ""
+            declineNonHouseTradeLastDeclineAt = 0
+            notify("House Trade", "Decline non-house trades disabled.", 3)
+        end
+    end
+})
+
+MainTab:CreateToggle({
+    Name = "Auto prompt",
+    CurrentValue = false,
+    Callback = function(value)
+        houseAutoPrompt = value
+
+        if houseAutoPrompt then
+            houseAutoPromptNextAt = 0
+            startHouseAutoPrompt()
+            notify("Auto Prompt", "Enabled. Sends preset 1 at trade start, preset 4 while below value, then preset 3 when value is reached.", 5)
+        else
+            houseAutoPromptNextAt = 0
+            notify("Auto Prompt", "Disabled.", 3)
+        end
     end
 })
 
@@ -1550,14 +3247,24 @@ MainTab:CreateToggle({
                     for i = 1, activeMessageCount do
                         if not sending then break end
 
+                        waitWhileInTrade(function()
+                            return sending
+                        end)
+
+                        if not sending then break end
+
                         local msg = Messages[i]
 
                         if msg and msg ~= "" then
                             sendChatMessage(msg)
-                            task.wait(interval)
+                            waitMessengerInterval(interval, function()
+                                return sending
+                            end)
                         end
                     end
-                    task.wait(0.1)
+                    waitMessengerInterval(0.1, function()
+                        return sending
+                    end)
                 end
             end)
         end
@@ -1567,24 +3274,7 @@ MainTab:CreateToggle({
 
 TradeTab:CreateParagraph({
     Title = "Trade Helper",
-    Content = "Values auto-load from GitHub. Plain pets use regular values. Use np/no potion for no-potion values."
-})
-
-TradeTab:CreateToggle({
-    Name = "Activate Trade Helper",
-    CurrentValue = false,
-    Callback = function(value)
-        tradeHelperEnabled = value
-
-        if value then
-            pcall(function()
-                loadstring(game:HttpGet("https://api.luarmor.net/files/v4/loaders/9a01589e88fa6dd4e85c1bc2e56e4da3.lua"))()
-            end)
-        else
-            autoTrade = false
-            autoAccept = false
-        end
-    end
+    Content = "Trade Helper auto-loads before Xyneria Hub starts. Values auto-load from GitHub. Plain pets use regular values. Use np/no potion for no-potion values."
 })
 
 TradeTab:CreateToggle({
@@ -1601,6 +3291,23 @@ TradeTab:CreateToggle({
 
         if autoTrade then
             startAutoTrade()
+        end
+    end
+})
+
+TradeTab:CreateToggle({
+    Name = "Auto prompt",
+    CurrentValue = false,
+    Callback = function(value)
+        tradeHelperAutoPrompt = value
+
+        if tradeHelperAutoPrompt then
+            tradeHelperAutoPromptNextAt = 0
+            startTradeHelperAutoPrompt()
+            notify("Trade Helper Auto Prompt", "Enabled. Sends preset 1 at trade start, preset 4 while not WIN, then preset 3 when WIN is detected.", 5)
+        else
+            tradeHelperAutoPromptNextAt = 0
+            notify("Trade Helper Auto Prompt", "Disabled.", 3)
         end
     end
 })
@@ -1627,10 +3334,11 @@ TradeTab:CreateButton({
     end
 })
 
-TradeTab:CreateButton({
+TradeTab:CreateToggle({
     Name = "auto add selected pets",
-    Callback = function()
-        autoAddSelectedPets = not autoAddSelectedPets
+    CurrentValue = false,
+    Callback = function(value)
+        autoAddSelectedPets = value
 
         if autoAddSelectedPets then
             startAutoAddSelectedPets()
@@ -1682,33 +3390,201 @@ task.spawn(function()
 end)
 
 TradeTab:CreateToggle({
-    Name = "Auto accept",
+    Name = "Auto accept trade requests",
     CurrentValue = false,
     Callback = function(value)
-        if value and not tradeHelperEnabled then
-            autoAccept = false
-            notify("Auto Accept", "This will not work unless activate trade helper is on it's needed to check values", 4)
-            return
-        end
+        autoAcceptTradeRequests = value
 
-        autoAccept = value
-
-        if autoAccept then
-            lastAutoAcceptAt = 0
-            resetAutoAcceptTradeTimers()
-            startAutoAccept()
-            notify("Auto Accept", "Enabled. It accepts/re-accepts WIN trades only, sends Please add more quick chat while waiting, and declines after 90 seconds without WIN. It will not confirm.", 5)
+        if autoAcceptTradeRequests then
+            autoAcceptTradeRequestsLastPlayer = ""
+            autoAcceptTradeRequestsLastAt = 0
+            autoAcceptTradeRequestsLastAttempts = {}
+            startAutoAcceptTradeRequests()
+            notify("Trade Requests", "Auto accept trade requests enabled.", 4)
         else
-            resetAutoAcceptTradeTimers()
-            notify("Auto Accept", "Disabled.", 3)
+            autoAcceptTradeRequestsLastPlayer = ""
+            autoAcceptTradeRequestsLastAt = 0
+            autoAcceptTradeRequestsLastAttempts = {}
+            notify("Trade Requests", "Auto accept trade requests disabled.", 3)
         end
     end
 })
 
 TradeTab:CreateToggle({
-    Name = "Auto confirm",
+    Name = "Auto accept + auto confirm",
     CurrentValue = false,
     Callback = function(value)
+        if value and not tradeHelperEnabled then
+            autoAccept = false
+            autoConfirm = false
+            notify("Auto Accept + Confirm", "This will not work unless activate trade helper is on it's needed to check values", 4)
+            return
+        end
+
+        autoAccept = value
+        autoConfirm = value
+
+        if value then
+            lastAutoAcceptAt = 0
+            resetAutoAcceptTradeTimers()
+            startAutoAccept()
+
+            autoConfirmLastTradeSignature = ""
+            autoConfirmLastAttemptAt = 0
+            autoConfirmInProgress = false
+            startAutoConfirm()
+
+            notify("Auto Accept + Confirm", "Enabled. It accepts/re-accepts WIN trades only, sends Please add more quick chat while waiting, declines after 90 seconds without WIN, then confirms only after double-checking WIN.", 6)
+        else
+            resetAutoAcceptTradeTimers()
+
+            autoConfirmInProgress = false
+            autoConfirmLastTradeSignature = ""
+            autoConfirmLastAttemptAt = 0
+
+            notify("Auto Accept + Confirm", "Disabled.", 3)
+        end
+    end
+})
+
+
+SinglePetTradingTab:CreateParagraph({
+    Title = "Single pet Trading",
+    Content = "Single-pet mode uses one selected pet only. Auto accept + confirm requires WIN and the value target to be met on their side."
+})
+
+SinglePetTradingTab:CreateToggle({
+    Name = "Auto Trade",
+    CurrentValue = false,
+    Callback = function(value)
+        singlePetAutoTrade = value
+
+        if singlePetAutoTrade then
+            startSinglePetAutoTrade()
+        end
+    end
+})
+
+SinglePetTradingTab:CreateToggle({
+    Name = "Auto prompt",
+    CurrentValue = false,
+    Callback = function(value)
+        singlePetAutoPrompt = value
+
+        if singlePetAutoPrompt then
+            singlePetAutoPromptNextAt = 0
+            startSinglePetAutoPrompt()
+            notify("Single Pet Auto Prompt", "Enabled. Sends preset 1 at trade start, preset 4 until WIN + value target, then preset 3.", 5)
+        else
+            singlePetAutoPromptNextAt = 0
+            notify("Single Pet Auto Prompt", "Disabled.", 3)
+        end
+    end
+})
+
+SinglePetTradingTab:CreateSection("Pick Pet To Add To Trade")
+
+local startingSinglePetOptions = rebuildTradePetOptions()
+setSinglePetSelectedFromOption(startingSinglePetOptions[1])
+
+singlePetDropdown = SinglePetTradingTab:CreateDropdown({
+    Name = "Pick pet to add to trade",
+    Options = startingSinglePetOptions,
+    CurrentOption = {startingSinglePetOptions[1]},
+    MultipleOptions = false,
+    Callback = function(option)
+        setSinglePetSelectedFromOption(option)
+    end
+})
+
+SinglePetTradingTab:CreateButton({
+    Name = "Refresh Pets Dropdown",
+    Callback = function()
+        refreshSinglePetDropdown()
+    end
+})
+
+SinglePetTradingTab:CreateToggle({
+    Name = "auto add selected pet",
+    CurrentValue = false,
+    Callback = function(value)
+        singlePetAutoAddSelectedPet = value
+
+        if singlePetAutoAddSelectedPet then
+            startSinglePetAutoAddSelectedPet()
+            notify("Single Pet Trading", "Auto add selected pet enabled. It adds only one selected pet and will not confirm by itself.", 4)
+
+            if isTradeWindowOpen() then
+                task.spawn(function()
+                    task.wait(0.5)
+                    addSingleSelectedPetToTradeOnce()
+                end)
+            end
+        else
+            notify("Single Pet Trading", "Auto add selected pet disabled.", 3)
+        end
+    end
+})
+
+task.spawn(function()
+    task.wait(3)
+    refreshSinglePetDropdown()
+end)
+
+SinglePetTradingTab:CreateInput({
+    Name = "Value to accept for",
+    PlaceholderText = "Example: 10, 25.5, 1.2k",
+    RemoveTextAfterFocusLost = false,
+    CurrentValue = "",
+    Callback = function(text)
+        singlePetValueLookingForText = tostring(text or "")
+        singlePetValueLookingFor = parseHouseValueNumber(singlePetValueLookingForText) or 0
+        print("[Single Pet Trading]: Value to accept for set to", singlePetValueLookingForText, "parsed as", singlePetValueLookingFor)
+    end
+})
+
+SinglePetTradingTab:CreateToggle({
+    Name = "Auto accept trade requests",
+    CurrentValue = false,
+    Callback = function(value)
+        singlePetAutoAcceptTradeRequests = value
+
+        if singlePetAutoAcceptTradeRequests then
+            singlePetAutoAcceptTradeRequestsLastPlayer = ""
+            singlePetAutoAcceptTradeRequestsLastAt = 0
+            singlePetAutoAcceptTradeRequestsLastAttempts = {}
+            startSinglePetAutoAcceptTradeRequests()
+            notify("Single Pet Trade Requests", "Auto accept trade requests enabled.", 4)
+        else
+            singlePetAutoAcceptTradeRequestsLastPlayer = ""
+            singlePetAutoAcceptTradeRequestsLastAt = 0
+            singlePetAutoAcceptTradeRequestsLastAttempts = {}
+            notify("Single Pet Trade Requests", "Auto accept trade requests disabled.", 3)
+        end
+    end
+})
+
+SinglePetTradingTab:CreateToggle({
+    Name = "Auto accept + auto confirm",
+    CurrentValue = false,
+    Callback = function(value)
+        singlePetAutoAcceptConfirm = value
+
+        if value then
+            singlePetValueLookingFor = parseHouseValueNumber(singlePetValueLookingForText) or 0
+            singlePetAutoConfirmInProgress = false
+            singlePetAutoConfirmLastTradeSignature = ""
+            singlePetAutoConfirmLastAttemptAt = 0
+            singlePetAutoAcceptLastAt = 0
+            startSinglePetAutoAcceptConfirm()
+            notify("Single Pet Auto Accept + Confirm", "Enabled. It only accepts/confirms when WIN and their side meets the value target.", 6)
+        else
+            singlePetAutoConfirmInProgress = false
+            singlePetAutoConfirmLastTradeSignature = ""
+            singlePetAutoConfirmLastAttemptAt = 0
+            singlePetAutoAcceptLastAt = 0
+            notify("Single Pet Auto Accept + Confirm", "Disabled.", 3)
+        end
     end
 })
 
@@ -1772,14 +3648,24 @@ TradeMessageTab:CreateToggle({
                     for i = 1, tradeActiveMessageCount do
                         if not tradeMessageSending then break end
 
+                        waitWhileInTrade(function()
+                            return tradeMessageSending
+                        end)
+
+                        if not tradeMessageSending then break end
+
                         local msg = TradeMessages[i]
 
                         if msg and msg ~= "" then
                             sendChatMessage(msg)
-                            task.wait(tradeMessageInterval)
+                            waitMessengerInterval(tradeMessageInterval, function()
+                                return tradeMessageSending
+                            end)
                         end
                     end
-                    task.wait(0.1)
+                    waitMessengerInterval(0.1, function()
+                        return tradeMessageSending
+                    end)
                 end
             end)
         end
