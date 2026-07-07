@@ -106,6 +106,7 @@ local selectedTradePetOptions = {}
 local selectedTradePetDataList = {}
 local selectedTradePetExportItems = {}
 local tradePetDropdown = nil
+local singlePetTradePetDropdown = nil
 local autoAddSelectedPets = false
 local autoAddSelectedPetsLoopRunning = false
 local autoAccept = false
@@ -122,6 +123,7 @@ local autoConfirmInProgress = false
 local autoConfirmLastTradeSignature = ""
 local autoConfirmLastAttemptAt = 0
 local AUTO_CONFIRM_RETRY_DELAY = 5
+local AUTO_CONFIRM_AFTER_ACCEPT_DELAY = 4
 local lastAutoAcceptAt = 0
 local autoAcceptAlreadyAcceptedCurrentWin = false
 local autoAcceptLastTradeSignature = ""
@@ -158,6 +160,14 @@ local houseAutoPromptNextAt = 0
 local tradeHelperAutoPrompt = false
 local tradeHelperAutoPromptLoopRunning = false
 local tradeHelperAutoPromptNextAt = 0
+local tradeHelperValueLookingForText = ""
+local tradeHelperValueLookingFor = 0
+local getTradeHelperValueTarget
+local tradeHelperValueTargetIsMet
+local singlePetAutoPrompt = false
+local singlePetAutoPromptLoopRunning = false
+local singlePetAutoPromptNextAt = 0
+local singlePetAutoAcceptConfirmIgnoreThreshold = false
 local HOUSE_AUTO_ACCEPT_RETRY_DELAY = 1.5
 local HOUSE_AUTO_CONFIRM_RETRY_DELAY = 5
 local HOUSE_AUTO_PROMPT_MIN_DELAY = 3
@@ -170,8 +180,8 @@ local declineNonHouseTradesLoopRunning = false
 local declineNonHouseTradeOpenedAt = 0
 local declineNonHouseTradeLastSignature = ""
 local declineNonHouseTradeDeclinedSignature = ""
-local DECLINE_NON_HOUSE_TRADE_GRACE_SECONDS = 2.5
-local DECLINE_NON_HOUSE_TRADE_RETRY_DELAY = 2
+local DECLINE_NON_HOUSE_TRADE_GRACE_SECONDS = 12
+local DECLINE_NON_HOUSE_TRADE_RETRY_DELAY = 4
 local declineNonHouseTradeLastDeclineAt = 0
 
 local function notify(title, content, duration)
@@ -854,22 +864,56 @@ local function startAutoConfirm()
             end
 
             local result = getTradeResult()
+            local thresholdMet, theirValue, target = tradeHelperValueTargetIsMet()
             local now = os.clock()
 
-            if result == "WIN" and not autoConfirmInProgress then
+            if result == "WIN" and thresholdMet and not autoConfirmInProgress then
                 if currentTradeSignature ~= autoConfirmLastTradeSignature or now - autoConfirmLastAttemptAt >= AUTO_CONFIRM_RETRY_DELAY then
+                    print("[Auto Confirm] WIN detected and threshold reached. Their value:", tostring(theirValue), "Target:", tostring(target))
                     autoConfirmLastTradeSignature = currentTradeSignature
                     autoConfirmLastAttemptAt = now
                     autoConfirmInProgress = true
 
                     task.spawn(function()
+                        local confirmDelayStartedAt = os.clock()
+
+                        while os.clock() - confirmDelayStartedAt < AUTO_CONFIRM_AFTER_ACCEPT_DELAY do
+                            if not autoConfirm or not tradeHelperEnabled then
+                                autoConfirmInProgress = false
+                                return
+                            end
+
+                            if getTradeResult() ~= "WIN" then
+                                warn("[Auto Confirm] Confirm delay stopped because trade is no longer WIN.")
+                                autoConfirmInProgress = false
+                                return
+                            end
+
+                            local stillMetDuringDelay, latestTheirValueDuringDelay, latestTargetDuringDelay = tradeHelperValueTargetIsMet()
+
+                            if not stillMetDuringDelay then
+                                warn("[Auto Confirm] Confirm delay stopped because their side value no longer meets target. Their value:", tostring(latestTheirValueDuringDelay), "Target:", tostring(latestTargetDuringDelay))
+                                autoConfirmInProgress = false
+                                return
+                            end
+
+                            task.wait(0.25)
+                        end
+
                         for attempt = 1, 3 do
                             if not autoConfirm or not tradeHelperEnabled then
                                 break
                             end
 
+                            local stillMet, latestTheirValue, latestTarget = tradeHelperValueTargetIsMet()
+
                             if getTradeResult() ~= "WIN" then
                                 warn("[Auto Confirm] Confirm stopped because trade is no longer WIN.")
+                                break
+                            end
+
+                            if not stillMet then
+                                warn("[Auto Confirm] Confirm stopped because their side value no longer meets target. Their value:", tostring(latestTheirValue), "Target:", tostring(latestTarget))
                                 break
                             end
 
@@ -883,7 +927,7 @@ local function startAutoConfirm()
                         autoConfirmInProgress = false
                     end)
                 end
-            elseif result ~= "WIN" then
+            elseif result ~= "WIN" or not thresholdMet then
                 autoConfirmLastTradeSignature = ""
             end
 
@@ -1237,6 +1281,36 @@ local function houseValueTargetIsMet()
     return false, theirValue, target
 end
 
+getTradeHelperValueTarget = function()
+    local target = tonumber(tradeHelperValueLookingFor)
+
+    if not target or target <= 0 then
+        target = parseHouseValueNumber(tradeHelperValueLookingForText) or 0
+    end
+
+    return target
+end
+
+tradeHelperValueTargetIsMet = function()
+    if singlePetAutoAcceptConfirmIgnoreThreshold then
+        return true, 0, 0
+    end
+
+    local target = getTradeHelperValueTarget()
+
+    if target <= 0 then
+        return false, nil, target
+    end
+
+    local theirValue = getTheirSideHouseTradeValue()
+
+    if theirValue and theirValue >= target then
+        return true, theirValue, target
+    end
+
+    return false, theirValue, target
+end
+
 local function acceptHouseTradeOnce(theirValue, target)
     local ok, result = callTradeApiRemote("TradeAPI/AcceptNegotiation")
 
@@ -1291,6 +1365,25 @@ local function startHouseAutoAcceptConfirmTrade()
                         houseAutoConfirmInProgress = true
 
                         task.spawn(function()
+                            local confirmDelayStartedAt = os.clock()
+
+                            while os.clock() - confirmDelayStartedAt < AUTO_CONFIRM_AFTER_ACCEPT_DELAY do
+                                if not houseAutoAcceptConfirmTrade then
+                                    houseAutoConfirmInProgress = false
+                                    return
+                                end
+
+                                local stillMetDuringDelay = houseValueTargetIsMet()
+
+                                if not stillMetDuringDelay then
+                                    warn("[House Auto Accept + Confirm] Confirm delay stopped because their side value no longer meets target.")
+                                    houseAutoConfirmInProgress = false
+                                    return
+                                end
+
+                                task.wait(0.25)
+                            end
+
                             for attempt = 1, 3 do
                                 if not houseAutoAcceptConfirmTrade then
                                     break
@@ -1403,7 +1496,8 @@ local function startHouseAutoPrompt()
 
     task.spawn(function()
         houseAutoPromptNextAt = 0
-        local lastTradeSignature = ""
+        local tradeSessionActive = false
+        local valueMetPromptSent = false
 
         while houseAutoPrompt do
             local currentTradeSignature = getTradeWindowSignature()
@@ -1411,15 +1505,17 @@ local function startHouseAutoPrompt()
 
             if not tradeOpen then
                 houseAutoPromptNextAt = 0
-                lastTradeSignature = ""
+                tradeSessionActive = false
+                valueMetPromptSent = false
                 task.wait(0.5)
                 continue
             end
 
             local now = os.clock()
 
-            if currentTradeSignature ~= lastTradeSignature then
-                lastTradeSignature = currentTradeSignature
+            if not tradeSessionActive then
+                tradeSessionActive = true
+                valueMetPromptSent = false
                 sendHouseAutoPromptQuickChat(HOUSE_AUTO_PROMPT_INITIAL_PRESET_ID, nil, nil)
                 scheduleNextHouseAutoPrompt(now)
             end
@@ -1433,7 +1529,10 @@ local function startHouseAutoPrompt()
 
                 if target and target > 0 then
                     if met then
-                        sendHouseAutoPromptQuickChat(HOUSE_AUTO_PROMPT_VALUE_MET_PRESET_ID, theirValue, target)
+                        if not valueMetPromptSent then
+                            valueMetPromptSent = true
+                            sendHouseAutoPromptQuickChat(HOUSE_AUTO_PROMPT_VALUE_MET_PRESET_ID, theirValue, target)
+                        end
                     else
                         sendHouseAutoPromptQuickChat(HOUSE_AUTO_PROMPT_ADD_MORE_PRESET_ID, theirValue, target)
                     end
@@ -1467,7 +1566,8 @@ local function startTradeHelperAutoPrompt()
 
     task.spawn(function()
         tradeHelperAutoPromptNextAt = 0
-        local lastTradeSignature = ""
+        local initialPromptSent = false
+        local valueMetPromptSent = false
 
         while tradeHelperAutoPrompt do
             local currentTradeSignature = getTradeWindowSignature()
@@ -1475,16 +1575,18 @@ local function startTradeHelperAutoPrompt()
 
             if not tradeOpen then
                 tradeHelperAutoPromptNextAt = 0
-                lastTradeSignature = ""
+                initialPromptSent = false
+                valueMetPromptSent = false
                 task.wait(0.5)
                 continue
             end
 
             local now = os.clock()
 
-            if currentTradeSignature ~= lastTradeSignature then
-                lastTradeSignature = currentTradeSignature
-                sendTradeHelperAutoPromptQuickChat(HOUSE_AUTO_PROMPT_INITIAL_PRESET_ID, nil)
+            if not initialPromptSent then
+                initialPromptSent = true
+                valueMetPromptSent = false
+                sendTradeHelperAutoPromptQuickChat(HOUSE_AUTO_PROMPT_INITIAL_PRESET_ID, "TRADE START")
                 scheduleNextTradeHelperAutoPrompt(now)
             end
 
@@ -1493,12 +1595,19 @@ local function startTradeHelperAutoPrompt()
             end
 
             if now >= tradeHelperAutoPromptNextAt then
-                local result = getTradeResult()
+                local thresholdMet, theirValue, target = tradeHelperValueTargetIsMet()
 
-                if result == "WIN" then
-                    sendTradeHelperAutoPromptQuickChat(HOUSE_AUTO_PROMPT_VALUE_MET_PRESET_ID, result)
+                if target and target > 0 then
+                    if thresholdMet then
+                        if not valueMetPromptSent then
+                            valueMetPromptSent = true
+                            sendTradeHelperAutoPromptQuickChat(HOUSE_AUTO_PROMPT_VALUE_MET_PRESET_ID, "VALUE REACHED " .. tostring(theirValue) .. "/" .. tostring(target))
+                        end
+                    else
+                        sendTradeHelperAutoPromptQuickChat(HOUSE_AUTO_PROMPT_ADD_MORE_PRESET_ID, "VALUE " .. tostring(theirValue or "WAITING") .. "/" .. tostring(target))
+                    end
                 else
-                    sendTradeHelperAutoPromptQuickChat(HOUSE_AUTO_PROMPT_ADD_MORE_PRESET_ID, result or "WAITING")
+                    warn("[Trade Helper Auto Prompt] Value looking for is empty or invalid.")
                 end
 
                 scheduleNextTradeHelperAutoPrompt(now)
@@ -1509,6 +1618,72 @@ local function startTradeHelperAutoPrompt()
 
         tradeHelperAutoPromptNextAt = 0
         tradeHelperAutoPromptLoopRunning = false
+    end)
+end
+
+local function scheduleNextSinglePetAutoPrompt(now)
+    singlePetAutoPromptNextAt = now + (math.random(HOUSE_AUTO_PROMPT_MIN_DELAY * 10, HOUSE_AUTO_PROMPT_MAX_DELAY * 10) / 10)
+end
+
+local function sendSinglePetAutoPromptQuickChat(presetId, result)
+    return sendQuickChatPresetToTradePartner(presetId, "Single Pet Auto Prompt", tostring(result or ""), "WIN")
+end
+
+local function startSinglePetAutoPrompt()
+    if singlePetAutoPromptLoopRunning then return end
+
+    singlePetAutoPromptLoopRunning = true
+
+    task.spawn(function()
+        singlePetAutoPromptNextAt = 0
+        local lastTradeSignature = ""
+        local valueMetPromptSent = false
+
+        while singlePetAutoPrompt do
+            local currentTradeSignature = getTradeWindowSignature()
+            local tradeOpen = currentTradeSignature ~= "no_trade_gui"
+
+            if not tradeOpen then
+                singlePetAutoPromptNextAt = 0
+                lastTradeSignature = ""
+                valueMetPromptSent = false
+                task.wait(0.5)
+                continue
+            end
+
+            local now = os.clock()
+
+            if currentTradeSignature ~= lastTradeSignature then
+                lastTradeSignature = currentTradeSignature
+                valueMetPromptSent = false
+                sendSinglePetAutoPromptQuickChat(HOUSE_AUTO_PROMPT_INITIAL_PRESET_ID, nil)
+                scheduleNextSinglePetAutoPrompt(now)
+            end
+
+            if singlePetAutoPromptNextAt <= 0 then
+                scheduleNextSinglePetAutoPrompt(now)
+            end
+
+            if now >= singlePetAutoPromptNextAt then
+                local result = getTradeResult()
+
+                if result == "WIN" then
+                    if not valueMetPromptSent then
+                        valueMetPromptSent = true
+                        sendSinglePetAutoPromptQuickChat(HOUSE_AUTO_PROMPT_VALUE_MET_PRESET_ID, result)
+                    end
+                else
+                    sendSinglePetAutoPromptQuickChat(HOUSE_AUTO_PROMPT_ADD_MORE_PRESET_ID, result or "WAITING")
+                end
+
+                scheduleNextSinglePetAutoPrompt(now)
+            end
+
+            task.wait(0.25)
+        end
+
+        singlePetAutoPromptNextAt = 0
+        singlePetAutoPromptLoopRunning = false
     end)
 end
 
@@ -1692,8 +1867,9 @@ local function startAutoAccept()
             end
 
             local result = getTradeResult()
+            local thresholdMet, theirValue, target = tradeHelperValueTargetIsMet()
 
-            if result == "WIN" then
+            if result == "WIN" and thresholdMet then
                 autoAcceptWaitingForWinSince = 0
                 autoAcceptNextQuickChatAt = 0
                 autoAcceptDeclineSentForCurrentTrade = false
@@ -1707,6 +1883,8 @@ local function startAutoAccept()
 
                 if now - lastAutoAcceptAt >= AUTO_ACCEPT_RETRY_DELAY then
                     lastAutoAcceptAt = now
+
+                    print("[Auto Accept] WIN detected and threshold reached. Their value:", tostring(theirValue), "Target:", tostring(target))
 
                     if acceptNegotiationOnce() then
                         autoAcceptAlreadyAcceptedCurrentWin = true
@@ -2446,6 +2624,12 @@ local function refreshTradePetDropdown()
         end)
     end
 
+    if singlePetTradePetDropdown then
+        pcall(function()
+            singlePetTradePetDropdown:Refresh(options, true)
+        end)
+    end
+
     setSelectedTradePetFromOption(options[1])
 end
 
@@ -2685,7 +2869,7 @@ MainTab:CreateToggle({
             houseAutoConfirmLastAttemptAt = 0
             houseAutoAcceptLastAt = 0
             startHouseAutoAcceptConfirmTrade()
-            notify("House Trade", "Enabled. It checks their side value only, accepts when the target is met, then confirms after re-checking the value.", 6)
+            notify("House Trade", "Enabled. It checks their side value only, accepts when the target is met, then waits 4 seconds before confirming after re-checking the value.", 6)
         else
             houseAutoConfirmInProgress = false
             houseAutoConfirmLastTradeSignature = ""
@@ -2740,7 +2924,7 @@ MainTab:CreateToggle({
         if houseAutoPrompt then
             houseAutoPromptNextAt = 0
             startHouseAutoPrompt()
-            notify("Auto Prompt", "Enabled. Sends preset 1 at trade start, preset 4 while below value, then preset 3 when value is reached.", 5)
+            notify("Auto Prompt", "Enabled. Sends preset 1 at trade start, preset 4 while below value, then preset 3 once when value is reached.", 5)
         else
             houseAutoPromptNextAt = 0
             notify("Auto Prompt", "Disabled.", 3)
@@ -2856,6 +3040,18 @@ TradeTab:CreateToggle({
     end
 })
 
+TradeTab:CreateInput({
+    Name = "Value looking for",
+    PlaceholderText = "Example: 10, 25.5, 1.2k",
+    RemoveTextAfterFocusLost = false,
+    CurrentValue = "",
+    Callback = function(text)
+        tradeHelperValueLookingForText = tostring(text or "")
+        tradeHelperValueLookingFor = parseHouseValueNumber(tradeHelperValueLookingForText) or 0
+        print("[Trade Helper]: Value looking for set to", tradeHelperValueLookingForText, "parsed as", tradeHelperValueLookingFor)
+    end
+})
+
 TradeTab:CreateToggle({
     Name = "Auto prompt",
     CurrentValue = false,
@@ -2865,7 +3061,7 @@ TradeTab:CreateToggle({
         if tradeHelperAutoPrompt then
             tradeHelperAutoPromptNextAt = 0
             startTradeHelperAutoPrompt()
-            notify("Trade Helper Auto Prompt", "Enabled. Sends preset 1 at trade start, preset 4 while not WIN, then preset 3 when WIN is detected.", 5)
+            notify("Trade Helper Auto Prompt", "Enabled. Sends preset 1 once at trade start, preset 4 every 3-4 seconds until value threshold is reached, then preset 3 once.", 5)
         else
             tradeHelperAutoPromptNextAt = 0
             notify("Trade Helper Auto Prompt", "Disabled.", 3)
@@ -2995,7 +3191,7 @@ TradeTab:CreateToggle({
             autoConfirmInProgress = false
             startAutoConfirm()
 
-            notify("Auto Accept + Confirm", "Enabled. It accepts/re-accepts WIN trades only, sends Please add more quick chat while waiting, declines after 90 seconds without WIN, then confirms only after double-checking WIN.", 6)
+            notify("Auto Accept + Confirm", "Enabled. It accepts/re-accepts only when WIN is detected and the Value looking for threshold is reached, then waits 4 seconds before confirming after double-checking both.", 6)
         else
             resetAutoAcceptTradeTimers()
 
@@ -3032,6 +3228,157 @@ SinglePetTradingTab:CreateToggle({
     end
 })
 
+SinglePetTradingTab:CreateToggle({
+    Name = "Auto prompt",
+    CurrentValue = false,
+    Callback = function(value)
+        singlePetAutoPrompt = value
+
+        if singlePetAutoPrompt then
+            singlePetAutoPromptNextAt = 0
+            startSinglePetAutoPrompt()
+            notify("Single Pet Auto Prompt", "Enabled. Sends preset 1 at trade start, preset 4 while not WIN, then preset 3 once when WIN is detected.", 5)
+        else
+            singlePetAutoPromptNextAt = 0
+            notify("Single Pet Auto Prompt", "Disabled.", 3)
+        end
+    end
+})
+
+SinglePetTradingTab:CreateSection("Pick Pets To Add To Trade")
+
+local startingSinglePetTradePetOptions = rebuildTradePetOptions()
+setSelectedTradePetFromOption(startingSinglePetTradePetOptions[1])
+
+singlePetTradePetDropdown = SinglePetTradingTab:CreateDropdown({
+    Name = "Pick pets to add to trade",
+    Options = startingSinglePetTradePetOptions,
+    CurrentOption = {startingSinglePetTradePetOptions[1]},
+    MultipleOptions = false,
+    Callback = function(option)
+        setSelectedTradePetFromOption(option)
+    end
+})
+
+SinglePetTradingTab:CreateButton({
+    Name = "Refresh Pets Dropdown",
+    Callback = function()
+        refreshTradePetDropdown()
+    end
+})
+
+SinglePetTradingTab:CreateToggle({
+    Name = "auto add selected pets",
+    CurrentValue = false,
+    Callback = function(value)
+        autoAddSelectedPets = value
+
+        if autoAddSelectedPets then
+            startAutoAddSelectedPets()
+            notify("Trade Pets", "Auto add selected pets enabled. It will not confirm trades.", 4)
+
+            if isTradeWindowOpen() then
+                task.spawn(function()
+                    task.wait(0.5)
+                    addSelectedPetsToTradeOnce()
+                end)
+            end
+        else
+            notify("Trade Pets", "Auto add selected pets disabled.", 3)
+        end
+    end
+})
+
+SinglePetTradingTab:CreateSlider({
+    Name = "Quantity To Add",
+    Range = {1, 18},
+    Increment = 1,
+    Suffix = "pet(s)",
+    CurrentValue = selectedTradePetQuantity,
+    Callback = function(value)
+        local maxAllowed = selectedTradePetMaxQuantity
+
+        if maxAllowed < 1 then
+            maxAllowed = 1
+        end
+
+        selectedTradePetQuantity = tonumber(value) or 1
+
+        if selectedTradePetQuantity < 1 then
+            selectedTradePetQuantity = 1
+        end
+
+        if selectedTradePetQuantity > maxAllowed then
+            selectedTradePetQuantity = maxAllowed
+        end
+
+        updateTradePetSelectionExport()
+        print("[Trade Pets]: Quantity set to " .. tostring(selectedTradePetQuantity) .. " per selected pet type.")
+    end
+})
+
+
+
+SinglePetTradingTab:CreateToggle({
+    Name = "Auto accept trade requests",
+    CurrentValue = false,
+    Callback = function(value)
+        autoAcceptTradeRequests = value
+
+        if autoAcceptTradeRequests then
+            autoAcceptTradeRequestsLastPlayer = ""
+            autoAcceptTradeRequestsLastAt = 0
+            autoAcceptTradeRequestsLastAttempts = {}
+            startAutoAcceptTradeRequests()
+            notify("Trade Requests", "Auto accept trade requests enabled.", 4)
+        else
+            autoAcceptTradeRequestsLastPlayer = ""
+            autoAcceptTradeRequestsLastAt = 0
+            autoAcceptTradeRequestsLastAttempts = {}
+            notify("Trade Requests", "Auto accept trade requests disabled.", 3)
+        end
+    end
+})
+
+SinglePetTradingTab:CreateToggle({
+    Name = "Auto accept + auto confirm",
+    CurrentValue = false,
+    Callback = function(value)
+        if value and not tradeHelperEnabled then
+            autoAccept = false
+            autoConfirm = false
+            singlePetAutoAcceptConfirmIgnoreThreshold = false
+            notify("Auto Accept + Confirm", "This will not work unless activate trade helper is on it's needed to check values", 4)
+            return
+        end
+
+        autoAccept = value
+        autoConfirm = value
+        singlePetAutoAcceptConfirmIgnoreThreshold = value
+
+        if value then
+            lastAutoAcceptAt = 0
+            resetAutoAcceptTradeTimers()
+            startAutoAccept()
+
+            autoConfirmLastTradeSignature = ""
+            autoConfirmLastAttemptAt = 0
+            autoConfirmInProgress = false
+            startAutoConfirm()
+
+            notify("Auto Accept + Confirm", "Enabled. It accepts/re-accepts WIN trades only, sends Please add more quick chat while waiting, declines after 90 seconds without WIN, then waits 4 seconds before confirming only after double-checking WIN.", 6)
+        else
+            resetAutoAcceptTradeTimers()
+
+            autoConfirmInProgress = false
+            autoConfirmLastTradeSignature = ""
+            autoConfirmLastAttemptAt = 0
+            singlePetAutoAcceptConfirmIgnoreThreshold = false
+
+            notify("Auto Accept + Confirm", "Disabled.", 3)
+        end
+    end
+})
 
 MessengerTab:CreateParagraph({
     Title = "Messages",
