@@ -218,6 +218,20 @@ end
 local function applyConfigData(data)
     if type(data) ~= "table" then return false end
 
+    local toggleData = type(data.toggles) == "table" and data.toggles or data
+
+    local function readToggle(name, defaultValue)
+        if type(toggleData) == "table" and toggleData[name] ~= nil then
+            return toggleData[name] == true
+        end
+
+        if data[name] ~= nil then
+            return data[name] == true
+        end
+
+        return defaultValue == true
+    end
+
     local loadedMessages = data.messages or {}
 
     for i = 1, MAX_MESSAGES do
@@ -231,7 +245,25 @@ local function applyConfigData(data)
     if activeMessageCount < 1 then activeMessageCount = 1 end
     if activeMessageCount > MAX_MESSAGES then activeMessageCount = MAX_MESSAGES end
 
-    autoMagicDoor = data.autoMagicDoor == true
+    autoMagicDoor = readToggle("autoMagicDoor", false)
+    sending = readToggle("sending", false)
+    tradeMessageSending = readToggle("tradeMessageSending", false)
+    autoAcceptTradeRequests = readToggle("autoAcceptTradeRequests", false)
+    houseAutoAcceptConfirmTrade = readToggle("houseAutoAcceptConfirmTrade", false)
+    declineNonHouseTrades = readToggle("declineNonHouseTrades", false)
+    houseAutoPrompt = readToggle("houseAutoPrompt", false)
+    autoTrade = readToggle("autoTrade", false)
+    tradeHelperAutoPrompt = readToggle("tradeHelperAutoPrompt", false)
+    autoAddSelectedPets = readToggle("autoAddSelectedPets", false)
+    autoAccept = readToggle("autoAccept", false)
+    autoConfirm = readToggle("autoConfirm", false)
+    singlePetAutoPrompt = readToggle("singlePetAutoPrompt", false)
+    singlePetAutoAcceptConfirmIgnoreThreshold = readToggle("singlePetAutoAcceptConfirmIgnoreThreshold", false)
+
+    houseValueLookingForText = tostring(data.houseValueLookingForText or "")
+    houseValueLookingFor = tonumber(data.houseValueLookingFor) or 0
+    tradeHelperValueLookingForText = tostring(data.tradeHelperValueLookingForText or "")
+    tradeHelperValueLookingFor = tonumber(data.tradeHelperValueLookingFor) or 0
 
     magicDoorDelay = tonumber(data.magicDoorDelay) or 55
     if magicDoorDelay < 10 then magicDoorDelay = 10 end
@@ -295,12 +327,49 @@ local function saveConfig()
 
     ensureFolder()
 
+    local toggles = {
+        autoMagicDoor = autoMagicDoor == true,
+        sending = sending == true,
+        tradeMessageSending = tradeMessageSending == true,
+        autoAcceptTradeRequests = autoAcceptTradeRequests == true,
+        houseAutoAcceptConfirmTrade = houseAutoAcceptConfirmTrade == true,
+        declineNonHouseTrades = declineNonHouseTrades == true,
+        houseAutoPrompt = houseAutoPrompt == true,
+        autoTrade = autoTrade == true,
+        tradeHelperAutoPrompt = tradeHelperAutoPrompt == true,
+        autoAddSelectedPets = autoAddSelectedPets == true,
+        autoAccept = autoAccept == true,
+        autoConfirm = autoConfirm == true,
+        singlePetAutoPrompt = singlePetAutoPrompt == true,
+        singlePetAutoAcceptConfirmIgnoreThreshold = singlePetAutoAcceptConfirmIgnoreThreshold == true
+    }
+
     local data = {
         messages = Messages,
         interval = interval,
         activeMessageCount = activeMessageCount,
-        autoMagicDoor = autoMagicDoor,
-        magicDoorDelay = magicDoorDelay
+        magicDoorDelay = magicDoorDelay,
+        houseValueLookingForText = houseValueLookingForText,
+        houseValueLookingFor = houseValueLookingFor,
+        tradeHelperValueLookingForText = tradeHelperValueLookingForText,
+        tradeHelperValueLookingFor = tradeHelperValueLookingFor,
+        toggles = toggles,
+
+        -- Keep old flat config keys working for existing/older saves.
+        autoMagicDoor = toggles.autoMagicDoor,
+        sending = toggles.sending,
+        tradeMessageSending = toggles.tradeMessageSending,
+        autoAcceptTradeRequests = toggles.autoAcceptTradeRequests,
+        houseAutoAcceptConfirmTrade = toggles.houseAutoAcceptConfirmTrade,
+        declineNonHouseTrades = toggles.declineNonHouseTrades,
+        houseAutoPrompt = toggles.houseAutoPrompt,
+        autoTrade = toggles.autoTrade,
+        tradeHelperAutoPrompt = toggles.tradeHelperAutoPrompt,
+        autoAddSelectedPets = toggles.autoAddSelectedPets,
+        autoAccept = toggles.autoAccept,
+        autoConfirm = toggles.autoConfirm,
+        singlePetAutoPrompt = toggles.singlePetAutoPrompt,
+        singlePetAutoAcceptConfirmIgnoreThreshold = toggles.singlePetAutoAcceptConfirmIgnoreThreshold
     }
 
     local ok, err = pcall(function()
