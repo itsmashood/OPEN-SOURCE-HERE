@@ -1,0 +1,7 @@
+-- if you want a value database to use for your scripts etc use this
+
+Elvebredd values url:
+VALUES_URL = "https://raw.githubusercontent.com/itsmashood/roblox-bridge/main/values_elvebredd"
+
+Amvgg values url:
+VALUES_URL = "https://raw.githubusercontent.com/itsmashood/roblox-bridge/main/values"
