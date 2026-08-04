@@ -1,6 +1,8 @@
+-- arched alot of tbi's fx's for my script "house trader" uh u can just take shit idrc i'm using brand new src anyway
+
+-- loading trade helper first so the hub still opens even if it takes a sec :3
 local TRADE_HELPER_LOADER_URL = "https://api.luarmor.net/files/v4/loaders/9a01589e88fa6dd4e85c1bc2e56e4da3.lua"
 
--- Start Trade Helper first, but do not let its loader block Xyneria Hub from opening.
 task.spawn(function()
     local ok, err = pcall(function()
         local source = game:HttpGet(TRADE_HELPER_LOADER_URL)
@@ -18,11 +20,11 @@ task.spawn(function()
     end
 end)
 
--- Small head start for Trade Helper, then continue loading Xyneria Hub either way.
 task.wait(0.75)
 
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 
+-- services and shared settings live up here so i can find EVERYTHING fast :)
 local TextChatService = game:GetService("TextChatService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local HttpService = game:GetService("HttpService")
@@ -34,8 +36,9 @@ local MAX_MESSAGES = 20
 local VALUES_URL = "https://raw.githubusercontent.com/itsmashood/scripts/main/amvgg_values.lua"
 
 
+-- house + trade messages and the main toggle states are set up here
 local Messages = {
-    "Trading pets!",
+    "Trading houses",
     "Visit my house!",
     "Offers welcome!"
 }
@@ -49,7 +52,7 @@ local interval = 5
 local sending = false
 
 local TradeMessages = {
-    "Trading pets!",
+    "Trading houses",
     "Send offers!",
     "Looking for fair trades!"
 }
@@ -66,6 +69,7 @@ local autoMagicDoor = false
 local magicDoorDelay = 55
 local magicDoorLoopRunning = false
 
+-- config saves and autoload stuff starts here :3
 local configFolder = "HouseHelperConfigs"
 local configName = "default"
 local selectedConfig = "default"
@@ -92,6 +96,7 @@ local tradeHelperEnabled = true
 local autoTrade = false
 local autoTradeLoopRunning = false
 
+-- dw about this shit even i found it a pain its long ik.
 local selectedTradePet = ""
 local selectedTradePetDisplay = ""
 local selectedTradePetQuantity = 1
@@ -184,6 +189,7 @@ local DECLINE_NON_HOUSE_TRADE_GRACE_SECONDS = 12
 local DECLINE_NON_HOUSE_TRADE_RETRY_DELAY = 4
 local declineNonHouseTradeLastDeclineAt = 0
 
+-- basic helpers for popups configs chat house controls and server hopping
 local function notify(title, content, duration)
     Rayfield:Notify({
         Title = title,
@@ -621,6 +627,7 @@ local function addGuiSearchRoot(roots, seen, root)
     end
 end
 
+-- trade ui scanning starts here so it can actually see whats going on :3
 local function getGuiSearchRoots()
     local roots = {}
     local seen = {}
@@ -839,6 +846,7 @@ local function confirmTradeOnce(attemptNumber)
     return ok
 end
 
+-- auto confirm waits and RECHECKS everything before it confirms :)
 local function startAutoConfirm()
     if autoConfirmLoopRunning then return end
 
@@ -942,6 +950,7 @@ local function startAutoConfirm()
 end
 
 
+-- this whole part reads values and works out which side of the trade is theirs
 local function parseHouseValueNumber(text)
     local clean = tostring(text or ""):lower()
     clean = clean:gsub("<[^>]->", "")
@@ -1331,6 +1340,7 @@ local function confirmHouseTradeOnce(attemptNumber, theirValue, target)
     return ok
 end
 
+-- house auto accept + confirm logic is here :3
 local function startHouseAutoAcceptConfirmTrade()
     if houseAutoAcceptConfirmTradeLoopRunning then return end
 
@@ -1421,6 +1431,7 @@ local function startHouseAutoAcceptConfirmTrade()
         houseAutoAcceptConfirmTradeLoopRunning = false
     end)
 end
+-- quick chat and all the auto prompt loops are handled around here :)
 local function getAutoAcceptTradePartner()
     local localPlayer = Players.LocalPlayer
     local playerGui = localPlayer:FindFirstChildOfClass("PlayerGui")
@@ -1687,6 +1698,7 @@ local function startSinglePetAutoPrompt()
     end)
 end
 
+-- checks for an actual house so random trades can be declined
 local function tradeTextLooksLikeHouse(text, path)
     local cleaned = cleanHouseValueText(text):lower()
     local joined = (cleaned .. " " .. tostring(path or "")):lower()
@@ -1830,6 +1842,7 @@ local function scheduleNextAutoAcceptQuickChat(now)
     autoAcceptNextQuickChatAt = now + math.random(AUTO_ACCEPT_QUICK_CHAT_MIN_DELAY, AUTO_ACCEPT_QUICK_CHAT_MAX_DELAY)
 end
 
+-- normal auto accept waits for WIN and the value target before doing anything :3
 local function startAutoAccept()
     if autoAcceptLoopRunning then return end
 
@@ -1989,6 +2002,7 @@ local function acceptIncomingTradeRequest(playerToAccept)
     return ok
 end
 
+-- auto trade requests and the basic trade checker are here
 local function startAutoAcceptTradeRequests()
     if autoAcceptTradeRequestsLoopRunning then return end
 
@@ -2011,8 +2025,6 @@ local function startAutoAcceptTradeRequests()
             else
                 autoAcceptTradeRequestsLastPlayer = ""
 
-                -- Fallback: some trade request popups do not expose the requester's name in visible UI.
-                -- The server only accepts if a real request from that player exists, so we safely try each player on a cooldown.
                 for _, otherPlayer in ipairs(Players:GetPlayers()) do
                     if otherPlayer ~= player then
                         local playerName = tostring(otherPlayer.Name)
@@ -2331,6 +2343,7 @@ local function makePetVariantDisplayName(baseName, variant)
     return variant.label .. " " .. baseName
 end
 
+-- pet inventory reading starts here, yes this part is HUGE lol :)
 local function getInventoryPetData()
     local petDataByName = {}
 
@@ -2396,6 +2409,7 @@ local function getInventoryPetData()
     return petDataByName
 end
 
+-- turns owned pets into dropdown options and keeps the selection updated
 local function rebuildTradePetOptions()
     local ownedPetData = getInventoryPetData()
 
@@ -2633,6 +2647,7 @@ local function refreshTradePetDropdown()
     setSelectedTradePetFromOption(options[1])
 end
 
+-- finds the add item remote and adds the picked pets to the trade :3
 local function findTradeAddRemote()
     local api = ReplicatedStorage:FindFirstChild("API")
     local candidateNames = {
@@ -2801,6 +2816,7 @@ local function startAutoAddSelectedPets()
     end)
 end
 
+-- making the window and ALL the tabs now :)
 local Window = Rayfield:CreateWindow({
     Name = "Xyneria hub",
     LoadingTitle = "Xyneria hub",
@@ -3017,6 +3033,7 @@ MainTab:CreateToggle({
 })
 
 
+-- trade helper tab = values pets auto accept and prompts :3
 TradeTab:CreateParagraph({
     Title = "Trade Helper",
     Content = "Trade Helper auto-loads before Xyneria Hub starts. Values auto-load from GitHub. Plain pets use regular values. Use np/no potion for no-potion values."
@@ -3205,6 +3222,7 @@ TradeTab:CreateToggle({
 })
 
 
+-- single pet tab is the same idea but only one pet at a time :)
 SinglePetTradingTab:CreateParagraph({
     Title = "Single pet Trading",
     Content = "Single pet trading controls. Auto Trade uses the same WIN / FAIR / LOSE detection logic as Trade Helper."
@@ -3380,6 +3398,7 @@ SinglePetTradingTab:CreateToggle({
     end
 })
 
+-- house and trade message boxes are kept separate down here
 MessengerTab:CreateParagraph({
     Title = "Messages",
     Content = "20 message boxes. Empty boxes are skipped."
@@ -3477,6 +3496,7 @@ for i = 1, MAX_MESSAGES do
     })
 end
 
+-- config controls are here so saves dont get mixed up :3
 ConfigTab:CreateParagraph({
     Title = "Config",
     Content = "Create configs, switch between configs, and set one to autoload."
@@ -3544,6 +3564,7 @@ ConfigTab:CreateButton({
     end
 })
 
+-- server hopper stuff is here because its its own lil thing :)
 ServerTab:CreateParagraph({
     Title = "Server Hopper",
     Content = "Teleport by PlaceId + JobId, hop to a random public server, or copy the current server info."
@@ -3590,6 +3611,7 @@ ServerTab:CreateButton({
     end
 })
 
+-- startup bits go last so everything loads AFTER the ui exists :3
 if autoMagicDoor then
     startAutoMagicDoor()
 end
