@@ -1,0 +1,63 @@
+$source = "your path"
+$outDir = "output path usually C:/"
+
+[long]$partSize = 450MB
+[int]$bufferSize = 8MB
+
+New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+# Remove any broken partial files from the previous attempt
+Remove-Item "$outDir\MY_EDSPACE.wacz.part*" -Force -ErrorAction SilentlyContinue
+
+$sourceStream = [System.IO.File]::OpenRead($source)
+
+try {
+    $part = 1
+    $buffer = New-Object byte[] $bufferSize
+
+    while ($sourceStream.Position -lt $sourceStream.Length) {
+
+        $partPath = Join-Path $outDir ("MY_EDSPACE.wacz.part{0:D3}" -f $part)
+        $outputStream = [System.IO.File]::Create($partPath)
+
+        try {
+            [long]$bytesLeft = $sourceStream.Length - $sourceStream.Position
+
+            if ($bytesLeft -gt $partSize) {
+                [long]$remaining = $partSize
+            } else {
+                [long]$remaining = $bytesLeft
+            }
+
+            while ($remaining -gt 0) {
+
+                if ($remaining -gt $buffer.Length) {
+                    [int]$toRead = $buffer.Length
+                } else {
+                    [int]$toRead = $remaining
+                }
+
+                $read = $sourceStream.Read($buffer, 0, $toRead)
+
+                if ($read -le 0) {
+                    break
+                }
+
+                $outputStream.Write($buffer, 0, $read)
+                $remaining -= $read
+            }
+        }
+        finally {
+            $outputStream.Dispose()
+        }
+
+        Write-Host "Created part $part"
+        $part++
+    }
+}
+finally {
+    $sourceStream.Dispose()
+}
+
+Write-Host ""
+Write-Host "DONE - all parts created!"
