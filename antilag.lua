@@ -702,5 +702,4 @@ function xyneriaApplyAntiLag()
         end)
     end
 
-    print("[Xyneria Anti-Lag] Strong cleanup enabled. Radius:", tostring(antiLagCleanRadius))
 end
