@@ -276,15 +276,14 @@ RunService.RenderStepped:Connect(function(dt)
 	local inputMove = Humanoid.MoveDirection
 
 	if inputMove.Magnitude > 0 then
-		local cameraRight = rotation.RightVector
-		local cameraForward = rotation.LookVector
+		local move = Vector3.new(
+			inputMove.X,
+			0,
+			inputMove.Z
+		)
 
-		local worldMove =
-			(cameraRight * inputMove.X) +
-			(cameraForward * -inputMove.Z)
-
-		if worldMove.Magnitude > 0 then
-			CamPosition += worldMove.Unit * MoveSpeed * 35 * dt
+		if move.Magnitude > 0 then
+			CamPosition += move.Unit * MoveSpeed * 35 * dt
 		end
 	end
 
