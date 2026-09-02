@@ -9,7 +9,7 @@ local v6 = {
 	Title = "Sprayhub lol",
 
 	BlurStrength = 10.5,
-	CharacterBlur = 1,
+	CharacterBlur = 0,
 	CharacterLighting = 0.85,
 
 	ScanInterval = 0.6,
@@ -648,7 +648,7 @@ local function v69(v87, v120)
 		end
 	end
 
-	v74.Name = "v206_" .. kind .. "_Clone"
+	v74.Name = "v206_" .. v120 .. "_Clone"
 	v74.Parent = v56
 
 	return {
@@ -684,7 +684,7 @@ local function v82(v87, v68)
 	end
 
 	local v83 = v68.kind == "character"
-	local v84 = v83 and v11.CharacterBlur or 1
+	local v84 = v83 and (1 - v11.CharacterBlur) or 1
 
 	for v78, v127 in pairs(v68.partMap or {}) do
 		if v78 and v78.Parent and v127 and v127.Parent then
