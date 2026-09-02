@@ -6,7 +6,7 @@ local v4 = v1.LocalPlayer
 local v5 = v4:WaitForChild("PlayerGui")
 
 local v6 = {
-	Title = "ItsWhiteSpray Blur",
+	Title = "Sprayhub lol",
 
 	BlurStrength = 10.5,
 	CharacterBlur = 1,
