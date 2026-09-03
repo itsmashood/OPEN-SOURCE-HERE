@@ -1,18 +1,25 @@
 local v1 = game:GetService("Players")
 local v2 = game:GetService("RunService")
 local v3 = game:GetService("UserInputService")
+local v134 = game:GetService("ReplicatedStorage")
 
 local v4 = v1.LocalPlayer
 local v5 = v4:WaitForChild("PlayerGui")
+
+local v135
+pcall(function()
+	local v136 = require(v134:WaitForChild("Fsys"))
+	v135 = v136.load("ClientData")
+end)
 
 local v6 = {
 	Title = "Sprayhub lol",
 
 	BlurStrength = 10.5,
-	CharacterBlur = 0,
+	CharacterBlur = 1,
 	CharacterLighting = 0.85,
 
-	ScanInterval = 0.6,
+	ScanInterval = 0.5,
 	PetSearchRadius = 22,
 	MaxPets = 6,
 	PetMaxModelSize = 18,
@@ -481,7 +488,7 @@ v56.Parent = v54
 
 local v57 = v4.Character
 local v58 = 0
-local v59 = {} -- tracks BaseParts + Bones + Motor6Ds so pet animations stay synced
+local v59 = {}
 
 local function v60()
 	v58 += 1
@@ -684,12 +691,14 @@ local function v82(v87, v68)
 	end
 
 	local v83 = v68.kind == "character"
-	local v84 = v83 and (1 - v11.CharacterBlur) or 1
+	local v84 = v83 and v11.CharacterBlur or 1
 
 	for v78, v127 in pairs(v68.partMap or {}) do
 		if v78 and v78.Parent and v127 and v127.Parent then
 			v127.CFrame = v78.CFrame
-			v127.Size = v78.Size
+			if v127.Size ~= v78.Size then
+				v127.Size = v78.Size
+			end
 			v127.Transparency = math.max(
 				v78.Transparency,
 				1 - v84
@@ -720,8 +729,6 @@ local function v82(v87, v68)
 			and v131.Parent then
 
 			v131.Transform = v130.Transform
-			v131.C0 = v130.C0
-			v131.C1 = v130.C1
 		end
 	end
 
@@ -788,6 +795,36 @@ local function v88(v87, v95)
 	return true
 end
 
+local function v137()
+	local v138 = {}
+
+	if not v135 then
+		return v138
+	end
+
+	local v139, v140 = pcall(function()
+		return v135.get("pet_char_wrappers")
+	end)
+
+	if not v139 or type(v140) ~= "table" then
+		return v138
+	end
+
+	for v141, v142 in pairs(v140) do
+		local v143 = v142 and v142.char
+		if v142
+			and v142.controller == v4
+			and typeof(v143) == "Instance"
+			and v143:IsA("Model")
+			and v143:IsDescendantOf(workspace) then
+
+			table.insert(v138, v143)
+		end
+	end
+
+	return v138
+end
+
 local function v93()
 	local v94 = {}
 
@@ -841,8 +878,10 @@ local function v99()
 	end
 
 	if v57 and v57.Parent then
-		for v125, v133 in ipairs(v93()) do
-			v100[v133] = "pet"
+		for v141, v143 in ipairs(v137()) do
+			if v143 ~= v57 then
+				v100[v143] = "pet"
+			end
 		end
 	end
 
@@ -879,7 +918,7 @@ task.spawn(function()
 	end
 end)
 
-v2:BindToRenderStep("v204", Enum.RenderPriority.Camera.Value + 50, function()
+v2:BindToRenderStep("v204", Enum.RenderPriority.Last.Value, function()
 	local v102 = workspace.CurrentCamera
 	if not v102 then
 		return
