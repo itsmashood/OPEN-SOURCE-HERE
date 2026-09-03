@@ -1,5 +1,6 @@
---// Dungeon Quest Combat Pilot V7.3
+--// Dungeon Quest Combat Pilot V7.4
 --// Left/right committed dodge + expanding hazard prediction
+--// Dense mob-cluster aim + full respawn combat reset
 --// Maximum WalkSpeed = 20
 --// Startup-safe hazard scan + corrected Beam tracking
 --//
@@ -40,6 +41,9 @@ local NEXT_ROOM_SPEED = 20
 local DESIRED_DISTANCE = 18
 local FORCE_SPACE_ENTER = 14
 local FORCE_SPACE_EXIT = 17
+
+local MOB_CLUSTER_RADIUS = 24
+local MOB_CLUSTER_STICK_RADIUS = 13
 
 local TARGET_LEASH_DISTANCE = 30
 local BOB_LEASH_DISTANCE = 26
@@ -201,7 +205,8 @@ local oldStates = {
     "DQ_COMBAT_V7",
     "DQ_COMBAT_V71",
     "DQ_COMBAT_V72",
-    "DQ_COMBAT_V73"
+    "DQ_COMBAT_V73",
+    "DQ_COMBAT_V74"
 }
 
 for _, name in ipairs(oldStates) do
@@ -219,7 +224,8 @@ local oldRenderNames = {
     "DQ_COMBAT_V7_RENDER",
     "DQ_COMBAT_V71_RENDER",
     "DQ_COMBAT_V72_RENDER",
-    "DQ_COMBAT_V73_RENDER"
+    "DQ_COMBAT_V73_RENDER",
+    "DQ_COMBAT_V74_RENDER"
 }
 
 for _, name in ipairs(oldRenderNames) do
@@ -231,7 +237,7 @@ end
 local State = {
     Alive = true,
     Connections = {},
-    RenderName = "DQ_COMBAT_V73_RENDER",
+    RenderName = "DQ_COMBAT_V74_RENDER",
     OwnAbilityIgnoreUntil = 0,
     SpacingActive = false,
     SpamSpells = false,
@@ -241,7 +247,7 @@ local State = {
     BossCheckTime = 0
 }
 
-ENV.DQ_COMBAT_V73 = State
+ENV.DQ_COMBAT_V74 = State
 
 --------------------------------------------------
 -- CLEAN GUI
@@ -259,6 +265,7 @@ pcall(function()
         "DQCombatV71",
         "DQCombatV72",
         "DQCombatV73",
+        "DQCombatV74",
         "XyneriaUI",
         "WindUI"
     }
@@ -945,8 +952,41 @@ local function nearestEnemy(position)
 end
 
 --------------------------------------------------
--- TARGET STICKINESS
+-- DENSE MOB-CLUSTER TARGETING
 --------------------------------------------------
+
+local function enemyWorldPosition(enemy)
+    if not validEnemy(enemy) then
+        return nil
+    end
+
+    local root =
+        enemy:FindFirstChild(
+            "HumanoidRootPart"
+        )
+
+    return root and root.Position or nil
+end
+
+local function exactTargetResult(
+    position,
+    target
+)
+    local targetPosition =
+        enemyWorldPosition(target)
+
+    if not targetPosition then
+        return nil, math.huge, nil, 0
+    end
+
+    return target,
+        (
+            flat(targetPosition)
+            - flat(position)
+        ).Magnitude,
+        targetPosition,
+        1
+end
 
 local function chooseTarget(
     position,
@@ -956,41 +996,143 @@ local function chooseTarget(
         closestDistance =
             nearestEnemy(position)
 
-    if not validEnemy(
-        currentTarget
-    ) then
-
-        return closest,
-            closestDistance
+    if not closest then
+        return nil, math.huge, nil, 0
     end
 
-    local currentRoot =
-        currentTarget:FindFirstChild(
-            "HumanoidRootPart"
+    -- A boss that has already been acquired remains the
+    -- direct target. A newly encountered nearest boss is
+    -- also attacked head-on rather than averaged with mobs.
+    if validEnemy(currentTarget)
+        and State:IsBossEnemy(currentTarget) then
+
+        return exactTargetResult(
+            position,
+            currentTarget
         )
-
-    if not currentRoot then
-        return closest,
-            closestDistance
     end
 
-    local currentDistance =
-        (
-            flat(currentRoot.Position)
-            - flat(position)
-        ).Magnitude
-
-    if closest
-        and closest ~= currentTarget
-        and closestDistance + 6
-            < currentDistance then
-
-        return closest,
-            closestDistance
+    if State:IsBossEnemy(closest) then
+        return exactTargetResult(
+            position,
+            closest
+        )
     end
 
-    return currentTarget,
-        currentDistance
+    -- Only consider enemies in the nearest active enemy
+    -- folder. This keeps room progression intact while still
+    -- preferring three grouped mobs over one isolated mob.
+    local activeFolder = closest.Parent
+    local candidates = {}
+
+    for enemy in pairs(Enemies) do
+        if not validEnemy(enemy) then
+            Enemies[enemy] = nil
+
+        elseif enemy.Parent == activeFolder then
+            local enemyPosition =
+                enemyWorldPosition(enemy)
+
+            if enemyPosition then
+                table.insert(
+                    candidates,
+                    {
+                        Enemy = enemy,
+                        Position = enemyPosition
+                    }
+                )
+            end
+        end
+    end
+
+    if #candidates == 0 then
+        return closest,
+            closestDistance,
+            enemyWorldPosition(closest),
+            1
+    end
+
+    local bestMembers = nil
+    local bestCentre = nil
+    local bestCount = 0
+    local bestDistance = math.huge
+
+    for _, seed in ipairs(candidates) do
+        local members = {}
+        local total = Vector3.zero
+
+        for _, candidate in ipairs(candidates) do
+            if (
+                flat(candidate.Position)
+                - flat(seed.Position)
+            ).Magnitude <= MOB_CLUSTER_RADIUS then
+
+                table.insert(members, candidate)
+                total = total + candidate.Position
+            end
+        end
+
+        local centre = total / #members
+        local centreDistance =
+            (
+                flat(centre)
+                - flat(position)
+            ).Magnitude
+
+        if #members > bestCount
+            or (
+                #members == bestCount
+                and centreDistance < bestDistance
+            ) then
+
+            bestMembers = members
+            bestCentre = centre
+            bestCount = #members
+            bestDistance = centreDistance
+        end
+    end
+
+    local selected = nil
+    local selectedDistance = math.huge
+
+    -- Preserve target stickiness when the current target is
+    -- actually part of the winning group, but immediately
+    -- abandon an isolated target for the denser cluster.
+    if validEnemy(currentTarget)
+        and currentTarget.Parent == activeFolder then
+
+        local currentPosition =
+            enemyWorldPosition(currentTarget)
+
+        if currentPosition
+            and (
+                flat(currentPosition)
+                - flat(bestCentre)
+            ).Magnitude <= MOB_CLUSTER_STICK_RADIUS then
+
+            selected = currentTarget
+        end
+    end
+
+    if not selected then
+        for _, member in ipairs(bestMembers) do
+            local distance =
+                (
+                    flat(member.Position)
+                    - flat(bestCentre)
+                ).Magnitude
+
+            if distance < selectedDistance then
+                selected = member.Enemy
+                selectedDistance = distance
+            end
+        end
+    end
+
+    return selected or closest,
+        bestDistance,
+        bestCentre,
+        bestCount
 end
 
 --------------------------------------------------
@@ -1435,7 +1577,7 @@ local function createVisual(
         )
 
     box.Name =
-        "DQ_V73_Hazard"
+        "DQ_V74_Hazard"
 
     box.Adornee = part
     box.LineThickness = 0.04
@@ -3994,7 +4136,7 @@ local function createFacing(root)
         )
 
     FacingAttachment.Name =
-        "DQ_V73_FacingAttachment"
+        "DQ_V74_FacingAttachment"
 
     FacingAttachment.Parent =
         root
@@ -4005,7 +4147,7 @@ local function createFacing(root)
         )
 
     FacingAlign.Name =
-        "DQ_V73_Facing"
+        "DQ_V74_Facing"
 
     FacingAlign.Mode =
         Enum.OrientationAlignmentMode.
@@ -4034,7 +4176,8 @@ end
 
 local function faceTarget(
     root,
-    target
+    target,
+    aimPosition
 )
     createFacing(root)
 
@@ -4055,7 +4198,10 @@ local function faceTarget(
 
     local direction =
         flat(
-            enemyRoot.Position
+            (
+                aimPosition
+                or enemyRoot.Position
+            )
             - root.Position
         )
 
@@ -4302,6 +4448,19 @@ local SpellFlow = (function()
         self.EUsed = false
     end
 
+    function flow:Reset()
+        self.ActiveKey = nil
+        self.PendingKey = nil
+        self.PackActive = false
+        self.Waiting = false
+        self.QUsed = false
+        self.EUsed = false
+        self.LastQ = -math.huge
+        self.LastE = -math.huge
+        self.ClearedAt = 0
+        self.KeyBusy = {}
+    end
+
     function flow:Observe(target, now)
         local key = packKey(target)
 
@@ -4505,6 +4664,9 @@ local Mode = "STARTING"
 local Target = nil
 local TargetDistance =
     math.huge
+
+local TargetAimPosition = nil
+local TargetClusterCount = 0
 
 local DesiredDirection =
     Vector3.zero
@@ -4802,6 +4964,112 @@ local function updateRemoteCastMode(
 end
 
 --------------------------------------------------
+-- CHARACTER DEATH / RESPAWN RESET
+--------------------------------------------------
+
+local BoundCharacters = {}
+
+local function resetCombatCycle(nextMode)
+    SpellFlow:Reset()
+
+    Target = nil
+    TargetDistance = math.huge
+    TargetAimPosition = nil
+    TargetClusterCount = 0
+
+    Mode = nextMode or "RESPAWN"
+    DesiredDirection = Vector3.zero
+    DesiredSpeed = CHASE_SPEED
+    FacingOkay = false
+
+    ThreatLevel = "NONE"
+    ThreatKind = "NONE"
+    ThreatCurrent = math.huge
+    ThreatFuture = math.huge
+    HadThreat = false
+    PreviousThreatLevel = "NONE"
+
+    State.OwnAbilityIgnoreUntil = 0
+    State.SpacingActive = false
+    State.TargetIsBoss = false
+    State.BossCheckTarget = nil
+    State.BossCheckResult = false
+    State.BossCheckTime = 0
+
+    RemoteCastMode = false
+    RemoteCastTarget = nil
+    RemoteBestDistance = math.huge
+    RemoteLastProgress = os.clock()
+    RemoteCastStarted = 0
+
+    DodgePoint = nil
+    DodgeUntil = 0
+    LastDodgePlan = 0
+    EvadePoint = nil
+    LastEvadePlan = 0
+    CurrentDodgeDirection = nil
+    DodgeSide = "NONE"
+    LastThreatSeen = 0
+    BlockedSince = nil
+
+    LastPosition = nil
+    LastPositionTime = os.clock()
+    StuckCount = 0
+    StationaryCount = 0
+    StationaryRoot = nil
+    StationaryPosition = nil
+    StationaryTime = os.clock()
+
+    clearPath()
+
+    pcall(function()
+        if FacingAlign then
+            FacingAlign.Enabled = false
+        end
+    end)
+end
+
+local function bindCharacterLifecycle(character)
+    if BoundCharacters[character] then
+        return
+    end
+
+    BoundCharacters[character] = true
+    resetCombatCycle("RESPAWN")
+
+    task.spawn(function()
+        local humanoid =
+            character:FindFirstChildOfClass(
+                "Humanoid"
+            )
+            or character:WaitForChild(
+                "Humanoid",
+                10
+            )
+
+        if humanoid
+            and humanoid:IsA("Humanoid") then
+
+            connect(
+                humanoid.Died,
+                function()
+                    resetCombatCycle("DEAD")
+                end
+            )
+        end
+    end)
+end
+
+connect(
+    LP.CharacterAdded,
+    bindCharacterLifecycle
+)
+
+if LP.Character then
+    bindCharacterLifecycle(LP.Character)
+end
+
+--------------------------------------------------
 -- MAIN AI
 --------------------------------------------------
 
@@ -4841,7 +5109,9 @@ connect(
         end
 
         Target,
-            TargetDistance =
+            TargetDistance,
+            TargetAimPosition,
+            TargetClusterCount =
                 chooseTarget(
                     root.Position,
                     Target
@@ -5430,11 +5700,28 @@ connect(
             return
         end
 
+        local navigationPosition =
+            TargetAimPosition
+            or enemyRoot.Position
+
         local toward =
             flat(
-                enemyRoot.Position
+                navigationPosition
                 - root.Position
             )
+
+        if toward.Magnitude < 0.05 then
+            toward =
+                flat(
+                    enemyRoot.Position
+                    - root.Position
+                )
+        end
+
+        if toward.Magnitude < 0.05 then
+            toward =
+                flat(root.CFrame.LookVector)
+        end
 
         --------------------------------------------------
         -- STUCK
@@ -5443,7 +5730,7 @@ connect(
         if stuckCheck(root) then
             buildPath(
                 root.Position,
-                enemyRoot.Position,
+                navigationPosition,
                 true
             )
         end
@@ -5455,10 +5742,10 @@ connect(
         if TargetDistance
             > DESIRED_DISTANCE + 3 then
 
-            local direct =
+                local direct =
                 staticRouteClear(
                     root.Position,
-                    enemyRoot.Position,
+                    navigationPosition,
                     character
                 )
 
@@ -5475,7 +5762,7 @@ connect(
                         or (
                             flat(
                                 PathDestination
-                                - enemyRoot.Position
+                                - navigationPosition
                             )
                         ).Magnitude > 7
 
@@ -5484,7 +5771,7 @@ connect(
 
                         buildPath(
                             root.Position,
-                            enemyRoot.Position,
+                            navigationPosition,
                             changed
                         )
                     end
@@ -5710,7 +5997,8 @@ RunService:BindToRenderStep(
         FacingOkay =
             faceTarget(
                 root,
-                Target
+                Target,
+                TargetAimPosition
             )
 
         --------------------------------------------------
@@ -6303,7 +6591,7 @@ local function createInterface()
                 XyneriaUI:CreateWindow({
                     Title = "DUNGEON QUEST",
                     Author = "XYNERIA",
-                    Version = "V7.3",
+                    Version = "V7.4",
                     Live = true,
                     StatusTitle = "COMBAT PILOT",
                     Folder = "Xyneria_DungeonQuest",
@@ -6674,6 +6962,10 @@ local function createInterface()
                             and "BOSS"
                             or "MOB"
                         )
+                        .. " | Cluster:"
+                        .. tostring(
+                            TargetClusterCount
+                        )
                         .. "\nThreat: "
                         .. ThreatLevel
                         .. " / "
@@ -6730,7 +7022,7 @@ local function createInterface()
             )
 
             app:Notify(
-                "Combat Pilot V7.3",
+                "Combat Pilot V7.4",
                 "Footagesus WindUI loaded with the Xyneria theme.",
                 "check",
                 2
@@ -6748,5 +7040,5 @@ end
 createInterface()
 
 print(
-    "Dungeon Quest Combat Pilot V7.3 loaded"
+    "Dungeon Quest Combat Pilot V7.4 loaded"
 )
