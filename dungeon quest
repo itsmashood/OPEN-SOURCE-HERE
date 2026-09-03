@@ -37,6 +37,11 @@ local NEXT_ROOM_SPEED = 20
 local DESIRED_DISTANCE = 18
 local TOO_CLOSE_DISTANCE = 8.5
 
+local TARGET_LEASH_DISTANCE = 30
+local BOB_LEASH_DISTANCE = 26
+local LEASH_INWARD_START = 4
+local LEASH_MAX_INWARD = 0.72
+
 local ABILITY_RANGE = 75
 local FACE_DOT_REQUIRED = 0.93
 
@@ -49,9 +54,14 @@ local E_INTERVAL = 0.50
 
 local BODY_RADIUS = 2.2
 
-local PREDICT_NEAR = 0.20
-local PREDICT_FAR = 0.45
+local PREDICT_NEAR = 0.24
+local PREDICT_FAR = 0.55
 local EXPAND_PREDICT = 0.72
+
+local HAZARD_UPDATE_INTERVAL = 0.025
+local PLAYER_MOTION_PREDICTION = 0.65
+local MAX_ACCEL_PREDICT_OFFSET = 8
+local MAX_SIZE_ACCELERATION = 48
 
 local EXPAND_RATE_MIN = 1.25
 local EXPAND_WARNING_EXTRA = 9.5
@@ -86,8 +96,8 @@ local VISUAL_LIFE = 0.35
 --------------------------------------------------
 
 local DODGE_LOCK = 0.36
-local DODGE_REPLAN = 0.13
-local EVADE_REPLAN = 0.20
+local DODGE_REPLAN = 0.09
+local EVADE_REPLAN = 0.12
 local DODGE_SIDE_RELEASE = 0.65
 
 local DODGE_RADII = {
@@ -118,6 +128,7 @@ local WAYPOINT_DISTANCE = 4
 
 local STUCK_INTERVAL = 0.55
 local MIN_PROGRESS = 0.80
+local STUCK_RESET_LIMIT = 5
 
 --------------------------------------------------
 -- CLEAN OLD VERSIONS
@@ -1064,7 +1075,13 @@ local function registerHazardPart(
         Velocity =
             Vector3.zero,
 
+        Acceleration =
+            Vector3.zero,
+
         SizeVelocity =
+            Vector3.zero,
+
+        SizeAcceleration =
             Vector3.zero,
 
         Expanding = false,
@@ -1130,6 +1147,9 @@ local function registerBeam(beam)
 
         V0 = Vector3.zero,
         V1 = Vector3.zero,
+
+        A0Acceleration = Vector3.zero,
+        A1Acceleration = Vector3.zero,
 
         PrevTime = now
     }
@@ -1217,7 +1237,9 @@ end)
 local function updateHazards()
     local now = os.clock()
 
-    if now - lastHazardUpdate < 0.05 then
+    if now - lastHazardUpdate
+        < HAZARD_UPDATE_INTERVAL then
+
         return
     end
 
@@ -1261,16 +1283,46 @@ local function updateHazards()
                         - hazard.PrevSize
                     ) / dt
 
+                local previousVelocity =
+                    hazard.Velocity
+
+                local previousSizeVelocity =
+                    hazard.SizeVelocity
+
                 hazard.Velocity =
                     hazard.Velocity:Lerp(
                         velocity,
-                        0.6
+                        0.72
                     )
 
                 hazard.SizeVelocity =
                     hazard.SizeVelocity:Lerp(
                         sizeVelocity,
-                        0.55
+                        0.70
+                    )
+
+                local acceleration =
+                    (
+                        hazard.Velocity
+                        - previousVelocity
+                    ) / dt
+
+                local sizeAcceleration =
+                    (
+                        hazard.SizeVelocity
+                        - previousSizeVelocity
+                    ) / dt
+
+                hazard.Acceleration =
+                    hazard.Acceleration:Lerp(
+                        acceleration,
+                        0.32
+                    )
+
+                hazard.SizeAcceleration =
+                    hazard.SizeAcceleration:Lerp(
+                        sizeAcceleration,
+                        0.30
                     )
 
                 local horizontalGrowth =
@@ -1280,12 +1332,29 @@ local function updateHazards()
                         0
                     )
 
+                local horizontalGrowthAcceleration =
+                    math.max(
+                        hazard.SizeAcceleration.X,
+                        hazard.SizeAcceleration.Z,
+                        0
+                    )
+
                 hazard.ExpandRate =
                     horizontalGrowth
+                    + horizontalGrowthAcceleration
+                        * 0.10
 
                 hazard.Expanding =
-                    horizontalGrowth
+                    hazard.ExpandRate
                         >= EXPAND_RATE_MIN
+
+                if hazard.Expanding then
+                    hazard.Expires =
+                        math.max(
+                            hazard.Expires,
+                            now + 0.35
+                        )
+                end
 
                 local speed =
                     flat(
@@ -1382,16 +1451,42 @@ local function updateHazards()
                             a1 - hazard.A1
                         ) / dt
 
+                    local previousV0 =
+                        hazard.V0
+
+                    local previousV1 =
+                        hazard.V1
+
                     hazard.V0 =
                         hazard.V0:Lerp(
                             velocity0,
-                            0.6
+                            0.72
                         )
 
                     hazard.V1 =
                         hazard.V1:Lerp(
                             velocity1,
-                            0.6
+                            0.72
+                        )
+
+                    hazard.A0Acceleration =
+                        hazard.A0Acceleration:Lerp(
+                            (
+                                hazard.V0
+                                - previousV0
+                            ) / dt,
+
+                            0.32
+                        )
+
+                    hazard.A1Acceleration =
+                        hazard.A1Acceleration:Lerp(
+                            (
+                                hazard.V1
+                                - previousV1
+                            ) / dt,
+
+                            0.32
                         )
                 end
 
@@ -1406,6 +1501,37 @@ end
 --------------------------------------------------
 -- DISTANCE TO PART
 --------------------------------------------------
+
+local function accelerationOffset(
+    acceleration,
+    future
+)
+    local offset =
+        (acceleration or Vector3.zero)
+        * 0.5
+        * future
+        * future
+
+    local horizontal =
+        flat(offset)
+
+    if horizontal.Magnitude
+        > MAX_ACCEL_PREDICT_OFFSET then
+
+        horizontal =
+            horizontal.Unit
+            * MAX_ACCEL_PREDICT_OFFSET
+
+        offset =
+            Vector3.new(
+                horizontal.X,
+                offset.Y,
+                horizontal.Z
+            )
+    end
+
+    return offset
+end
 
 local function partDistance(
     position,
@@ -1425,6 +1551,10 @@ local function partDistance(
         part.Position
         + hazard.Velocity
             * future
+        + accelerationOffset(
+            hazard.Acceleration,
+            future
+        )
 
     local rotation =
         part.CFrame
@@ -1439,6 +1569,10 @@ local function partDistance(
         hazard.SizeVelocity
         or Vector3.zero
 
+    local sizeAcceleration =
+        hazard.SizeAcceleration
+        or Vector3.zero
+
     local predictedSize =
         part.Size
         + Vector3.new(
@@ -1446,6 +1580,27 @@ local function partDistance(
             math.max(sizeVelocity.Y, 0),
             math.max(sizeVelocity.Z, 0)
         ) * future
+        + Vector3.new(
+            math.clamp(
+                sizeAcceleration.X,
+                0,
+                MAX_SIZE_ACCELERATION
+            ),
+
+            math.clamp(
+                sizeAcceleration.Y,
+                0,
+                MAX_SIZE_ACCELERATION
+            ),
+
+            math.clamp(
+                sizeAcceleration.Z,
+                0,
+                MAX_SIZE_ACCELERATION
+            )
+        ) * 0.5
+            * future
+            * future
 
     local localPosition =
         predictedCF:
@@ -1536,11 +1691,19 @@ local function beamDistance(
         a0
         + hazard.V0
             * future
+        + accelerationOffset(
+            hazard.A0Acceleration,
+            future
+        )
 
     a1 =
         a1
         + hazard.V1
             * future
+        + accelerationOffset(
+            hazard.A1Acceleration,
+            future
+        )
 
     local point =
         Vector2.new(
@@ -1608,7 +1771,27 @@ end
 -- FIND MAIN THREAT
 --------------------------------------------------
 
-local function getThreat(position)
+local function getThreat(
+    position,
+    playerVelocity
+)
+    playerVelocity =
+        flat(
+            playerVelocity
+            or Vector3.zero
+        )
+
+    local maximumPredictedSpeed =
+        MAX_SPEED * 1.25
+
+    if playerVelocity.Magnitude
+        > maximumPredictedSpeed then
+
+        playerVelocity =
+            playerVelocity.Unit
+            * maximumPredictedSpeed
+    end
+
     local bestHazard = nil
     local bestLevel = nil
 
@@ -1650,14 +1833,22 @@ local function getThreat(position)
 
         local nearFuture =
             hazardDistance(
-                position,
+                position
+                    + playerVelocity
+                        * PREDICT_NEAR
+                        * PLAYER_MOTION_PREDICTION,
+
                 hazard,
                 PREDICT_NEAR
             )
 
         local farFuture =
             hazardDistance(
-                position,
+                position
+                    + playerVelocity
+                        * expansionHorizon
+                        * PLAYER_MOTION_PREDICTION,
+
                 hazard,
                 expansionHorizon
             )
@@ -2372,6 +2563,28 @@ local CurrentDodgeDirection =
 local DodgeSide = "NONE"
 local LastThreatSeen = 0
 
+local function targetLeashDistance(enemy)
+    if not validEnemy(enemy) then
+        return math.huge
+    end
+
+    local name =
+        string.lower(
+            enemy.Name or ""
+        )
+
+    if name:find(
+        "bob",
+        1,
+        true
+    ) then
+
+        return BOB_LEASH_DISTANCE
+    end
+
+    return TARGET_LEASH_DISTANCE
+end
+
 local function candidateDirections(
     root,
     threat,
@@ -2433,17 +2646,55 @@ local function candidateDirections(
                 )
 
             if toward.Magnitude > 0.05 then
+                local enemyDistance =
+                    toward.Magnitude
+
                 toward = toward.Unit
 
-                local left =
+                local baseLeft =
                     Vector3.new(
                         -toward.Z,
                         0,
                         toward.X
                     )
 
-                local right = -left
+                local baseRight = -baseLeft
                 local outward = -toward
+
+                local leash =
+                    targetLeashDistance(
+                        enemy
+                    )
+
+                local leashPressure =
+                    math.clamp(
+                        (
+                            enemyDistance
+                            - (
+                                leash
+                                - LEASH_INWARD_START
+                            )
+                        )
+                        / LEASH_INWARD_START,
+
+                        0,
+                        1
+                    )
+
+                local inward =
+                    toward
+                    * leashPressure
+                    * LEASH_MAX_INWARD
+
+                local left =
+                    baseLeft + inward
+
+                local right =
+                    baseRight + inward
+
+                local allowOutwardFallback =
+                    enemyDistance
+                    < leash - 2
 
                 if DodgeSide == "NONE"
                     or DodgeSide == "LEFT" then
@@ -2451,10 +2702,11 @@ local function candidateDirections(
                     add(left, "LEFT", false)
 
                     if threat
-                        and threat.Expanding then
+                        and threat.Expanding
+                        and allowOutwardFallback then
 
                         add(
-                            left
+                            baseLeft
                             + outward
                                 * EXPAND_OUTWARD_WEIGHT,
                             "LEFT",
@@ -2469,10 +2721,11 @@ local function candidateDirections(
                     add(right, "RIGHT", false)
 
                     if threat
-                        and threat.Expanding then
+                        and threat.Expanding
+                        and allowOutwardFallback then
 
                         add(
-                            right
+                            baseRight
                             + outward
                                 * EXPAND_OUTWARD_WEIGHT,
                             "RIGHT",
@@ -2549,6 +2802,9 @@ local function committedLateralFallback(
                 )
 
             if toward.Magnitude > 0.05 then
+                local enemyDistance =
+                    toward.Magnitude
+
                 toward = toward.Unit
 
                 local left =
@@ -2581,12 +2837,43 @@ local function committedLateralFallback(
                     or left
 
                 if threat
-                    and threat.Expanding then
+                    and threat.Expanding
+                    and enemyDistance
+                        < targetLeashDistance(enemy)
+                            - 2 then
 
                     direction =
                         direction
                         - toward
                             * EXPAND_OUTWARD_WEIGHT
+                end
+
+                local leash =
+                    targetLeashDistance(
+                        enemy
+                    )
+
+                local leashPressure =
+                    math.clamp(
+                        (
+                            enemyDistance
+                            - (
+                                leash
+                                - LEASH_INWARD_START
+                            )
+                        )
+                        / LEASH_INWARD_START,
+
+                        0,
+                        1
+                    )
+
+                if leashPressure > 0 then
+                    direction =
+                        direction
+                        + toward
+                            * leashPressure
+                            * LEASH_MAX_INWARD
                 end
 
                 return direction.Unit
@@ -2717,13 +3004,21 @@ local function findEscape(
                                     - DESIRED_DISTANCE
                                 ) * 0.18
 
-                        elseif enemyDistance > 36 then
+                        elseif enemyDistance
+                            > targetLeashDistance(
+                                enemy
+                            ) then
+
+                            local excess =
+                                enemyDistance
+                                - targetLeashDistance(
+                                    enemy
+                                )
+
                             score =
                                 score
-                                + (
-                                    enemyDistance
-                                    - 36
-                                ) * 0.4
+                                + 180
+                                + excess * 14
                         end
                     end
                 end
@@ -3244,6 +3539,39 @@ local LastPositionTime =
 
 local StuckCount = 0
 
+local function resetStuckCharacter(root)
+    local character =
+        root and root.Parent
+
+    local humanoid =
+        character
+        and character:FindFirstChildOfClass(
+            "Humanoid"
+        )
+
+    StuckCount = 0
+    LastPosition = nil
+    LastPositionTime = os.clock()
+    DesiredDirection = Vector3.zero
+    Mode = "RESETTING"
+
+    clearPath()
+
+    if not humanoid
+        or humanoid.Health <= 0 then
+
+        return
+    end
+
+    pcall(function()
+        humanoid.Health = 0
+    end)
+
+    pcall(function()
+        character:BreakJoints()
+    end)
+end
+
 local function stuckCheck(root)
     local now = os.clock()
 
@@ -3284,6 +3612,13 @@ local function stuckCheck(root)
 
         StuckCount =
             StuckCount + 1
+
+        if StuckCount
+            > STUCK_RESET_LIMIT then
+
+            resetStuckCharacter(root)
+            return false
+        end
 
         return true
     end
@@ -3361,7 +3696,15 @@ connect(
             currentDistance,
             futureDistance =
                 getThreat(
-                    root.Position
+                    root.Position,
+
+                    flat(
+                        root.AssemblyLinearVelocity
+                        or Vector3.zero
+                    ) * 0.60
+                    + DesiredDirection
+                        * DesiredSpeed
+                        * 0.40
                 )
 
         ThreatLevel =
