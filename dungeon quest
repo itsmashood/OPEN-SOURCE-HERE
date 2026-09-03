@@ -1,0 +1,4305 @@
+--// Dungeon Quest Combat Pilot V7.1 STABLE
+--// Predictive dodge + aggressive combat + path recovery
+--// Maximum WalkSpeed = 20
+--//
+--// Q = Inner Focus
+--// E = Geyser
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local CoreGui = game:GetService("CoreGui")
+local PathfindingService = game:GetService("PathfindingService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+
+local LP = Players.LocalPlayer
+local ENV = (getgenv and getgenv()) or _G
+
+--------------------------------------------------
+-- SETTINGS
+--------------------------------------------------
+
+local ENABLED = true
+local AUTO_Q = true
+local AUTO_E = true
+
+local MAX_SPEED = 20
+
+local CHASE_SPEED = 20
+local ORBIT_SPEED = 19.8
+local SPACE_SPEED = 20
+local EVADE_SPEED = 20
+local DODGE_SPEED = 20
+local PATH_SPEED = 20
+local NEXT_ROOM_SPEED = 20
+
+local DESIRED_DISTANCE = 18
+local TOO_CLOSE_DISTANCE = 8.5
+
+local ABILITY_RANGE = 75
+local FACE_DOT_REQUIRED = 0.93
+
+local Q_INTERVAL = 0.50
+local E_INTERVAL = 0.50
+
+--------------------------------------------------
+-- PREDICTION
+--------------------------------------------------
+
+local BODY_RADIUS = 2.2
+
+local PREDICT_NEAR = 0.20
+local PREDICT_FAR = 0.45
+
+local WARNING_EXTRA = 5.5
+local EMERGENCY_EXTRA = 1.5
+
+local EXIT_EXTRA = 0.8
+local ROUTE_EXTRA = 1.2
+local DESTINATION_EXTRA = 2.0
+
+--------------------------------------------------
+-- HAZARD LIFETIME
+--------------------------------------------------
+
+local PRECAST_LIFE = 1.05
+local HITBOX_LIFE = 0.50
+local ATTACK_LIFE = 0.85
+local GENERIC_LIFE = 0.65
+
+local PROJECTILE_LIFE = 1.20
+local LASER_PART_LIFE = 5.0
+
+local LASER_PART_MAX_LIFE = 12
+
+local VISUAL_LIFE = 0.35
+
+--------------------------------------------------
+-- DODGE
+--------------------------------------------------
+
+local DODGE_LOCK = 0.36
+local DODGE_REPLAN = 0.13
+local EVADE_REPLAN = 0.20
+
+local DODGE_RADII = {
+    8,
+    13,
+    19,
+    27,
+    34
+}
+
+local EVADE_RADII = {
+    7,
+    11,
+    16
+}
+
+local DIRECTION_COUNT = 12
+
+local ROUTE_SAMPLES = 7
+local TOP_CANDIDATES = 8
+
+--------------------------------------------------
+-- PATHING
+--------------------------------------------------
+
+local PATH_RECALC = 0.60
+local BLOCKED_DELAY = 0.16
+
+local WAYPOINT_DISTANCE = 4
+
+local STUCK_INTERVAL = 0.55
+local MIN_PROGRESS = 0.80
+
+--------------------------------------------------
+-- CLEAN OLD VERSIONS
+--------------------------------------------------
+
+local function stopOld(name)
+    local old = ENV[name]
+
+    if not old then
+        return
+    end
+
+    old.Alive = false
+
+    for _, connection in ipairs(
+        old.Connections or {}
+    ) do
+        pcall(function()
+            connection:Disconnect()
+        end)
+    end
+
+    if old.RenderName then
+        pcall(function()
+            RunService:UnbindFromRenderStep(
+                old.RenderName
+            )
+        end)
+    end
+end
+
+local oldStates = {
+    "DQ_AUTO_DODGE_V2",
+    "DQ_AUTO_DODGE_V3",
+    "DQ_MOVEMENT_V35",
+    "DQ_COMBAT_V4",
+    "DQ_DODGE_MOVEMENT_V3M",
+    "DQ_COMBAT_V5",
+    "DQ_COMBAT_V51",
+    "DQ_COMBAT_V6",
+    "DQ_COMBAT_V61",
+    "DQ_COMBAT_V62",
+    "DQ_COMBAT_V7",
+    "DQ_COMBAT_V71"
+}
+
+for _, name in ipairs(oldStates) do
+    stopOld(name)
+end
+
+local oldRenderNames = {
+    "DQCombatMovement",
+    "DQ_DODGE_MOVEMENT_V3M_RENDER",
+    "DQ_COMBAT_V5_RENDER",
+    "DQ_COMBAT_V51_RENDER",
+    "DQ_COMBAT_V6_RENDER",
+    "DQ_COMBAT_V61_RENDER",
+    "DQ_COMBAT_V62_RENDER",
+    "DQ_COMBAT_V7_RENDER",
+    "DQ_COMBAT_V71_RENDER"
+}
+
+for _, name in ipairs(oldRenderNames) do
+    pcall(function()
+        RunService:UnbindFromRenderStep(name)
+    end)
+end
+
+local State = {
+    Alive = true,
+    Connections = {},
+    RenderName = "DQ_COMBAT_V71_RENDER"
+}
+
+ENV.DQ_COMBAT_V71 = State
+
+--------------------------------------------------
+-- CLEAN GUI
+--------------------------------------------------
+
+pcall(function()
+    local names = {
+        "DQCombatV4",
+        "DQCombatV5",
+        "DQCombatV51",
+        "DQCombatV6",
+        "DQCombatV61",
+        "DQCombatV62",
+        "DQCombatV7",
+        "DQCombatV71"
+    }
+
+    for _, name in ipairs(names) do
+        local object =
+            CoreGui:FindFirstChild(name)
+
+        if object then
+            object:Destroy()
+        end
+    end
+end)
+
+--------------------------------------------------
+-- HELPERS
+--------------------------------------------------
+
+local function connect(signal, callback)
+    local connection =
+        signal:Connect(callback)
+
+    table.insert(
+        State.Connections,
+        connection
+    )
+
+    return connection
+end
+
+local function flat(vector)
+    return Vector3.new(
+        vector.X,
+        0,
+        vector.Z
+    )
+end
+
+local function getCharacter()
+    local character =
+        LP.Character
+
+    if not character then
+        return
+    end
+
+    local root =
+        character:FindFirstChild(
+            "HumanoidRootPart"
+        )
+
+    local humanoid =
+        character:FindFirstChildOfClass(
+            "Humanoid"
+        )
+
+    if not root
+        or not humanoid
+        or humanoid.Health <= 0 then
+
+        return
+    end
+
+    return character, root, humanoid
+end
+
+local function isPlayerObject(object)
+    for _, player in ipairs(
+        Players:GetPlayers()
+    ) do
+        local character =
+            player.Character
+
+        if character
+            and object:IsDescendantOf(
+                character
+            ) then
+
+            return true
+        end
+    end
+
+    return false
+end
+
+--------------------------------------------------
+-- IGNORE OUR Q / E EFFECTS
+--------------------------------------------------
+
+local function isOwnAbility(object)
+    local current = object
+
+    for _ = 1, 7 do
+        if not current then
+            break
+        end
+
+        local name =
+            string.lower(
+                current.Name
+            )
+
+        if name:find(
+            "geyser",
+            1,
+            true
+        )
+            or name:find(
+                "innerfocus",
+                1,
+                true
+            )
+            or name:find(
+                "inner focus",
+                1,
+                true
+            ) then
+
+            return true
+        end
+
+        current = current.Parent
+    end
+
+    return false
+end
+
+--------------------------------------------------
+-- DUNGEON
+--------------------------------------------------
+
+local dungeon =
+    Workspace:FindFirstChild(
+        "dungeon"
+    )
+
+--------------------------------------------------
+-- ENEMY CACHE
+--------------------------------------------------
+
+local Enemies = {}
+local EnemyFolders = {}
+
+local lastEnemyFallback = 0
+
+local function validEnemy(model)
+    if not model
+        or not model:IsA("Model")
+        or not model.Parent
+        or model.Parent.Name
+            ~= "enemyFolder" then
+
+        return false
+    end
+
+    local humanoid =
+        model:FindFirstChildOfClass(
+            "Humanoid"
+        )
+
+    local root =
+        model:FindFirstChild(
+            "HumanoidRootPart"
+        )
+
+    return humanoid ~= nil
+        and humanoid.Health > 0
+        and root ~= nil
+end
+
+local function registerEnemy(model)
+    if not model:IsA("Model") then
+        return
+    end
+
+    task.spawn(function()
+        for _ = 1, 50 do
+            if not State.Alive
+                or not model.Parent then
+
+                return
+            end
+
+            if validEnemy(model) then
+                Enemies[model] = true
+                return
+            end
+
+            task.wait(0.04)
+        end
+    end)
+end
+
+local function watchEnemyFolder(folder)
+    if EnemyFolders[folder] then
+        return
+    end
+
+    EnemyFolders[folder] = true
+
+    for _, object in ipairs(
+        folder:GetChildren()
+    ) do
+        registerEnemy(object)
+    end
+
+    connect(
+        folder.ChildAdded,
+        registerEnemy
+    )
+
+    connect(
+        folder.ChildRemoved,
+        function(object)
+            Enemies[object] = nil
+        end
+    )
+end
+
+local function setupDungeon()
+    if not dungeon then
+        dungeon =
+            Workspace:FindFirstChild(
+                "dungeon"
+            )
+    end
+
+    if not dungeon then
+        return
+    end
+
+    for _, object in ipairs(
+        dungeon:GetDescendants()
+    ) do
+        if object:IsA("Folder")
+            and object.Name
+                == "enemyFolder" then
+
+            watchEnemyFolder(object)
+        end
+    end
+
+    connect(
+        dungeon.DescendantAdded,
+        function(object)
+            if object:IsA("Folder")
+                and object.Name
+                    == "enemyFolder" then
+
+                watchEnemyFolder(object)
+
+            elseif object:IsA("Model")
+                and object.Parent
+                and object.Parent.Name
+                    == "enemyFolder" then
+
+                registerEnemy(object)
+            end
+        end
+    )
+end
+
+setupDungeon()
+
+local function fallbackEnemyScan()
+    if not dungeon then
+        dungeon =
+            Workspace:FindFirstChild(
+                "dungeon"
+            )
+    end
+
+    if not dungeon then
+        return
+    end
+
+    local now = os.clock()
+
+    if now - lastEnemyFallback < 0.08 then
+        return
+    end
+
+    lastEnemyFallback = now
+
+    for _, object in ipairs(
+        dungeon:GetDescendants()
+    ) do
+        if validEnemy(object) then
+            Enemies[object] = true
+        end
+    end
+end
+
+local function nearestEnemy(position)
+    local best = nil
+    local bestDistance = math.huge
+
+    for enemy in pairs(Enemies) do
+        if not validEnemy(enemy) then
+            Enemies[enemy] = nil
+
+        else
+            local enemyRoot =
+                enemy:FindFirstChild(
+                    "HumanoidRootPart"
+                )
+
+            local distance =
+                (
+                    flat(enemyRoot.Position)
+                    - flat(position)
+                ).Magnitude
+
+            if distance < bestDistance then
+                best = enemy
+                bestDistance = distance
+            end
+        end
+    end
+
+    if not best then
+        fallbackEnemyScan()
+
+        for enemy in pairs(Enemies) do
+            if validEnemy(enemy) then
+                local enemyRoot =
+                    enemy:FindFirstChild(
+                        "HumanoidRootPart"
+                    )
+
+                local distance =
+                    (
+                        flat(enemyRoot.Position)
+                        - flat(position)
+                    ).Magnitude
+
+                if distance < bestDistance then
+                    best = enemy
+                    bestDistance = distance
+                end
+            end
+        end
+    end
+
+    return best, bestDistance
+end
+
+--------------------------------------------------
+-- TARGET STICKINESS
+--------------------------------------------------
+
+local function chooseTarget(
+    position,
+    currentTarget
+)
+    local closest,
+        closestDistance =
+            nearestEnemy(position)
+
+    if not validEnemy(
+        currentTarget
+    ) then
+
+        return closest,
+            closestDistance
+    end
+
+    local currentRoot =
+        currentTarget:FindFirstChild(
+            "HumanoidRootPart"
+        )
+
+    if not currentRoot then
+        return closest,
+            closestDistance
+    end
+
+    local currentDistance =
+        (
+            flat(currentRoot.Position)
+            - flat(position)
+        ).Magnitude
+
+    if closest
+        and closest ~= currentTarget
+        and closestDistance + 6
+            < currentDistance then
+
+        return closest,
+            closestDistance
+    end
+
+    return currentTarget,
+        currentDistance
+end
+
+--------------------------------------------------
+-- ROOM PROGRESSION
+--------------------------------------------------
+
+local LastRoomOrder = 0
+
+local function enemyRoomOrder(enemy)
+    if not enemy
+        or not enemy.Parent then
+
+        return nil
+    end
+
+    local room =
+        enemy.Parent.Parent
+
+    if not room then
+        return nil
+    end
+
+    local order =
+        room:FindFirstChild(
+            "order"
+        )
+
+    if order
+        and order:IsA(
+            "ValueBase"
+        ) then
+
+        return order.Value
+    end
+
+    return nil
+end
+
+local function findNextRoom(order)
+    if not dungeon then
+        return nil
+    end
+
+    local bestRoom = nil
+    local bestOrder = math.huge
+
+    for _, room in ipairs(
+        dungeon:GetChildren()
+    ) do
+        local value =
+            room:FindFirstChild(
+                "order"
+            )
+
+        if value
+            and value:IsA(
+                "ValueBase"
+            )
+            and value.Value > order
+            and value.Value < bestOrder then
+
+            bestRoom = room
+            bestOrder = value.Value
+        end
+    end
+
+    return bestRoom,
+        bestOrder
+end
+
+local function nearestRoomSpawn(
+    room,
+    position
+)
+    local folder =
+        room:FindFirstChild(
+            "enemyFolder"
+        )
+
+    if not folder then
+        return nil
+    end
+
+    local best = nil
+    local bestDistance = math.huge
+
+    for _, object in ipairs(
+        folder:GetChildren()
+    ) do
+        if object:IsA("BasePart")
+            and string.lower(
+                object.Name
+            ) == "spawn" then
+
+            local distance =
+                (
+                    flat(object.Position)
+                    - flat(position)
+                ).Magnitude
+
+            if distance < bestDistance then
+                best = object
+                bestDistance = distance
+            end
+        end
+    end
+
+    return best
+end
+
+local function roomProgressPoint(
+    room,
+    position
+)
+    if not room then
+        return nil
+    end
+
+    local checkpoint =
+        room:FindFirstChild(
+            "checkPoint"
+        )
+
+    if checkpoint
+        and checkpoint:IsA(
+            "BasePart"
+        ) then
+
+        local distance =
+            (
+                flat(checkpoint.Position)
+                - flat(position)
+            ).Magnitude
+
+        if distance > 6 then
+            return checkpoint
+        end
+    end
+
+    local spawn =
+        nearestRoomSpawn(
+            room,
+            position
+        )
+
+    if spawn then
+        return spawn
+    end
+
+    return checkpoint
+end
+
+--------------------------------------------------
+-- HAZARDS
+--------------------------------------------------
+
+local Hazards = {}
+
+local watchedParts = {}
+local watchedBeams = {}
+
+local lastHazardUpdate = 0
+
+--------------------------------------------------
+-- CLASSIFICATION
+--------------------------------------------------
+
+local function nameBlob(object)
+    local names = {}
+    local current = object
+
+    for _ = 1, 6 do
+        if not current then
+            break
+        end
+
+        table.insert(
+            names,
+            string.lower(
+                current.Name
+            )
+        )
+
+        current = current.Parent
+    end
+
+    return table.concat(
+        names,
+        " "
+    )
+end
+
+local function classifyPart(
+    part,
+    genericAllowed
+)
+    local name =
+        string.lower(
+            part.Name
+        )
+
+    local blob =
+        nameBlob(part)
+
+    if name == "precast"
+        or blob:find(
+            "precast",
+            1,
+            true
+        ) then
+
+        return "PRECAST"
+    end
+
+    if name == "hitbox"
+        or blob:find(
+            "hitbox",
+            1,
+            true
+        )
+        or blob:find(
+            "hurtbox",
+            1,
+            true
+        ) then
+
+        return "HITBOX"
+    end
+
+    if blob:find(
+        "laser",
+        1,
+        true
+    )
+        or blob:find(
+            "beam",
+            1,
+            true
+        ) then
+
+        return "LASER"
+    end
+
+    if blob:find(
+        "projectile",
+        1,
+        true
+    )
+        or blob:find(
+            "shuriken",
+            1,
+            true
+        )
+        or blob:find(
+            "missile",
+            1,
+            true
+        )
+        or blob:find(
+            "fireball",
+            1,
+            true
+        )
+        or blob:find(
+            "orb",
+            1,
+            true
+        )
+        or blob:find(
+            "shot",
+            1,
+            true
+        ) then
+
+        return "PROJECTILE"
+    end
+
+    if blob:find(
+        "strike",
+        1,
+        true
+    )
+        or blob:find(
+            "slam",
+            1,
+            true
+        )
+        or blob:find(
+            "wave",
+            1,
+            true
+        )
+        or blob:find(
+            "aoe",
+            1,
+            true
+        )
+        or blob:find(
+            "warning",
+            1,
+            true
+        )
+        or blob:find(
+            "telegraph",
+            1,
+            true
+        )
+        or blob:find(
+            "explosion",
+            1,
+            true
+        ) then
+
+        return "ATTACK"
+    end
+
+    if genericAllowed then
+        local size =
+            math.max(
+                part.Size.X,
+                part.Size.Z
+            )
+
+        if size >= 6
+            and not part.CanCollide
+            and (
+                part.CanTouch
+                or part.Transparency < 0.9
+            ) then
+
+            return "GENERIC"
+        end
+    end
+
+    return nil
+end
+
+local function hazardLife(kind)
+    if kind == "PRECAST" then
+        return PRECAST_LIFE
+    end
+
+    if kind == "HITBOX" then
+        return HITBOX_LIFE
+    end
+
+    if kind == "LASER" then
+        return LASER_PART_LIFE
+    end
+
+    if kind == "PROJECTILE" then
+        return PROJECTILE_LIFE
+    end
+
+    if kind == "ATTACK" then
+        return ATTACK_LIFE
+    end
+
+    return GENERIC_LIFE
+end
+
+--------------------------------------------------
+-- VISUAL
+--------------------------------------------------
+
+local function createVisual(
+    part,
+    kind
+)
+    local box =
+        Instance.new(
+            "SelectionBox"
+        )
+
+    box.Name =
+        "DQ_V71_Hazard"
+
+    box.Adornee = part
+    box.LineThickness = 0.04
+    box.SurfaceTransparency = 0.90
+
+    if kind == "PRECAST" then
+        box.Color3 =
+            Color3.fromRGB(
+                255,
+                170,
+                0
+            )
+    else
+        box.Color3 =
+            Color3.fromRGB(
+                255,
+                60,
+                60
+            )
+    end
+
+    box.SurfaceColor3 =
+        box.Color3
+
+    box.Parent = part
+
+    return box
+end
+
+--------------------------------------------------
+-- REGISTER PART
+--------------------------------------------------
+
+local function registerHazardPart(
+    part,
+    kind
+)
+    if not part
+        or not part:IsA(
+            "BasePart"
+        )
+        or not part.Parent
+        or isPlayerObject(part)
+        or isOwnAbility(part) then
+
+        return
+    end
+
+    local existing =
+        Hazards[part]
+
+    local now = os.clock()
+
+    if existing then
+        existing.Expires =
+            math.max(
+                existing.Expires,
+                now + hazardLife(kind)
+            )
+
+        return
+    end
+
+    Hazards[part] = {
+        Type = "PART",
+        Kind = kind,
+        Object = part,
+
+        Created = now,
+
+        Expires =
+            now + hazardLife(kind),
+
+        PrevPosition =
+            part.Position,
+
+        PrevTime = now,
+
+        Velocity =
+            Vector3.zero,
+
+        Visual =
+            createVisual(
+                part,
+                kind
+            ),
+
+        VisualUntil =
+            now + VISUAL_LIFE
+    }
+
+    if not watchedParts[part] then
+        watchedParts[part] = true
+    end
+end
+
+--------------------------------------------------
+-- REGISTER BEAM
+--------------------------------------------------
+
+local function registerBeam(beam)
+    if not beam
+        or not beam:IsA("Beam")
+        or isOwnAbility(beam) then
+
+        return
+    end
+
+    if Hazards[beam] then
+        return
+    end
+
+    if not beam.Enabled then
+        return
+    end
+
+    local now = os.clock()
+
+    local a0 = nil
+    local a1 = nil
+
+    if beam.Attachment0 then
+        a0 =
+            beam.Attachment0.
+                WorldPosition
+    end
+
+    if beam.Attachment1 then
+        a1 =
+            beam.Attachment1.
+                WorldPosition
+    end
+
+    Hazards[beam] = {
+        Type = "BEAM",
+        Kind = "LASER",
+        Object = beam,
+
+        Created = now,
+
+        A0 = a0,
+        A1 = a1,
+
+        V0 = Vector3.zero,
+        V1 = Vector3.zero,
+
+        PrevTime = now
+    }
+
+    if not watchedBeams[beam] then
+        watchedBeams[beam] = true
+
+        connect(
+            beam:
+            GetPropertyChangedSignal(
+                "Enabled"
+            ),
+            function()
+                if beam.Enabled then
+                    if not Hazards[beam] then
+                        registerBeam(beam)
+                    end
+                else
+                    Hazards[beam] = nil
+                end
+            end
+        )
+    end
+end
+
+--------------------------------------------------
+-- NEW WORKSPACE OBJECTS
+--------------------------------------------------
+
+connect(
+    Workspace.DescendantAdded,
+    function(object)
+        if object:IsA(
+            "BasePart"
+        ) then
+
+            local kind =
+                classifyPart(
+                    object,
+                    true
+                )
+
+            if kind then
+                registerHazardPart(
+                    object,
+                    kind
+                )
+            end
+
+        elseif object:IsA(
+            "Beam"
+        ) then
+
+            registerBeam(object)
+        end
+    end
+)
+
+--------------------------------------------------
+-- EXISTING KNOWN HAZARDS
+--------------------------------------------------
+
+for _, object in ipairs(
+    Workspace:GetDescendants()
+) do
+    if object:IsA("Beam") then
+        registerBeam(object)
+
+    elseif object:IsA(
+        "BasePart"
+    ) then
+
+        local kind =
+            classifyPart(
+                object,
+                false
+            )
+
+        if kind then
+            registerHazardPart(
+                object,
+                kind
+            )
+        end
+    end
+end
+
+--------------------------------------------------
+-- UPDATE HAZARD MOTION
+--------------------------------------------------
+
+local function updateHazards()
+    local now = os.clock()
+
+    if now - lastHazardUpdate < 0.05 then
+        return
+    end
+
+    lastHazardUpdate = now
+
+    for object, hazard in pairs(
+        Hazards
+    ) do
+        if hazard.Type == "PART" then
+            local part =
+                hazard.Object
+
+            if not part
+                or not part.Parent then
+
+                if hazard.Visual then
+                    pcall(function()
+                        hazard.Visual:
+                            Destroy()
+                    end)
+                end
+
+                Hazards[object] = nil
+
+            else
+                local dt =
+                    math.max(
+                        now - hazard.PrevTime,
+                        0.001
+                    )
+
+                local velocity =
+                    (
+                        part.Position
+                        - hazard.PrevPosition
+                    ) / dt
+
+                hazard.Velocity =
+                    hazard.Velocity:Lerp(
+                        velocity,
+                        0.6
+                    )
+
+                local speed =
+                    flat(
+                        hazard.Velocity
+                    ).Magnitude
+
+                hazard.PrevPosition =
+                    part.Position
+
+                hazard.PrevTime =
+                    now
+
+                if hazard.Kind
+                    == "PROJECTILE"
+                    and speed > 0.5 then
+
+                    hazard.Expires =
+                        now + 0.75
+                end
+
+                if hazard.Kind
+                    == "LASER"
+                    and speed > 0.15 then
+
+                    hazard.Expires =
+                        math.min(
+                            now + 1.25,
+                            hazard.Created
+                                + LASER_PART_MAX_LIFE
+                        )
+                end
+
+                if hazard.Visual
+                    and now
+                        >= hazard.VisualUntil then
+
+                    pcall(function()
+                        hazard.Visual:
+                            Destroy()
+                    end)
+
+                    hazard.Visual = nil
+                end
+
+                if now >= hazard.Expires then
+                    if hazard.Visual then
+                        pcall(function()
+                            hazard.Visual:
+                                Destroy()
+                        end)
+                    end
+
+                    Hazards[object] = nil
+                end
+            end
+
+        elseif hazard.Type
+            == "BEAM" then
+
+            local beam =
+                hazard.Object
+
+            if not beam
+                or not beam.Parent
+                or not beam.Enabled
+                or not beam.Attachment0
+                or not beam.Attachment1 then
+
+                Hazards[object] = nil
+
+            else
+                local a0 =
+                    beam.Attachment0.
+                        WorldPosition
+
+                local a1 =
+                    beam.Attachment1.
+                        WorldPosition
+
+                local dt =
+                    math.max(
+                        now - hazard.PrevTime,
+                        0.001
+                    )
+
+                if hazard.A0
+                    and hazard.A1 then
+
+                    local velocity0 =
+                        (
+                            a0 - hazard.A0
+                        ) / dt
+
+                    local velocity1 =
+                        (
+                            a1 - hazard.A1
+                        ) / dt
+
+                    hazard.V0 =
+                        hazard.V0:Lerp(
+                            velocity0,
+                            0.6
+                        )
+
+                    hazard.V1 =
+                        hazard.V1:Lerp(
+                            velocity1,
+                            0.6
+                        )
+                end
+
+                hazard.A0 = a0
+                hazard.A1 = a1
+                hazard.PrevTime = now
+            end
+        end
+    end
+end
+
+--------------------------------------------------
+-- DISTANCE TO PART
+--------------------------------------------------
+
+local function partDistance(
+    position,
+    hazard,
+    future
+)
+    local part =
+        hazard.Object
+
+    if not part
+        or not part.Parent then
+
+        return math.huge
+    end
+
+    local predictedPosition =
+        part.Position
+        + hazard.Velocity
+            * future
+
+    local rotation =
+        part.CFrame
+        - part.CFrame.Position
+
+    local predictedCF =
+        CFrame.new(
+            predictedPosition
+        ) * rotation
+
+    local localPosition =
+        predictedCF:
+        PointToObjectSpace(
+            position
+        )
+
+    local dx =
+        math.max(
+            math.abs(
+                localPosition.X
+            )
+            - part.Size.X / 2,
+            0
+        )
+
+    local dz =
+        math.max(
+            math.abs(
+                localPosition.Z
+            )
+            - part.Size.Z / 2,
+            0
+        )
+
+    return math.sqrt(
+        dx * dx
+        + dz * dz
+    )
+end
+
+--------------------------------------------------
+-- DISTANCE TO BEAM
+--------------------------------------------------
+
+local function distanceSegment(
+    point,
+    a,
+    b
+)
+    local ab = b - a
+
+    local length =
+        ab:Dot(ab)
+
+    if length <= 0.0001 then
+        return
+            (point - a).Magnitude
+    end
+
+    local t =
+        math.clamp(
+            (point - a):
+                Dot(ab)
+            / length,
+            0,
+            1
+        )
+
+    local closest =
+        a + ab * t
+
+    return
+        (point - closest).Magnitude
+end
+
+local function beamDistance(
+    position,
+    hazard,
+    future
+)
+    local beam =
+        hazard.Object
+
+    if not beam
+        or not beam.Parent
+        or not beam.Enabled
+        or not beam.Attachment0
+        or not beam.Attachment1 then
+
+        return math.huge
+    end
+
+    local a0 =
+        hazard.A0
+        or beam.Attachment0.
+            WorldPosition
+
+    local a1 =
+        hazard.A1
+        or beam.Attachment1.
+            WorldPosition
+
+    a0 =
+        a0
+        + hazard.V0
+            * future
+
+    a1 =
+        a1
+        + hazard.V1
+            * future
+
+    local point =
+        Vector2.new(
+            position.X,
+            position.Z
+        )
+
+    local start =
+        Vector2.new(
+            a0.X,
+            a0.Z
+        )
+
+    local finish =
+        Vector2.new(
+            a1.X,
+            a1.Z
+        )
+
+    local distance =
+        distanceSegment(
+            point,
+            start,
+            finish
+        )
+
+    local width =
+        math.max(
+            beam.Width0,
+            beam.Width1,
+            1
+        )
+
+    return math.max(
+        distance - width / 2,
+        0
+    )
+end
+
+local function hazardDistance(
+    position,
+    hazard,
+    future
+)
+    if hazard.Type == "PART" then
+        return partDistance(
+            position,
+            hazard,
+            future
+        )
+    end
+
+    if hazard.Type == "BEAM" then
+        return beamDistance(
+            position,
+            hazard,
+            future
+        )
+    end
+
+    return math.huge
+end
+
+--------------------------------------------------
+-- FIND MAIN THREAT
+--------------------------------------------------
+
+local function getThreat(position)
+    local bestHazard = nil
+    local bestLevel = nil
+
+    local bestCurrent =
+        math.huge
+
+    local bestFuture =
+        math.huge
+
+    local bestScore =
+        math.huge
+
+    for _, hazard in pairs(
+        Hazards
+    ) do
+        local current =
+            hazardDistance(
+                position,
+                hazard,
+                0
+            )
+
+        local nearFuture =
+            hazardDistance(
+                position,
+                hazard,
+                PREDICT_NEAR
+            )
+
+        local farFuture =
+            hazardDistance(
+                position,
+                hazard,
+                PREDICT_FAR
+            )
+
+        local predicted =
+            math.min(
+                nearFuture,
+                farFuture
+            )
+
+        local closing =
+            current - predicted
+
+        local emergency =
+            current
+                <= BODY_RADIUS
+                    + EMERGENCY_EXTRA
+            or nearFuture
+                <= BODY_RADIUS
+                    + 0.7
+
+        local warning =
+            false
+
+        if not emergency then
+            warning =
+                predicted
+                    <= BODY_RADIUS
+                        + WARNING_EXTRA
+                and (
+                    closing > 0.20
+                    or current
+                        <= BODY_RADIUS + 3
+                    or hazard.Kind
+                        == "PRECAST"
+                )
+        end
+
+        local level = nil
+        local score = nil
+
+        if emergency then
+            level = "EMERGENCY"
+
+            score =
+                -1000
+                + predicted
+                + current
+
+        elseif warning then
+            level = "WARNING"
+
+            score =
+                -100
+                + predicted
+                + current
+                - math.max(
+                    closing,
+                    0
+                ) * 3
+        end
+
+        if score
+            and score < bestScore then
+
+            bestScore = score
+
+            bestHazard =
+                hazard
+
+            bestLevel =
+                level
+
+            bestCurrent =
+                current
+
+            bestFuture =
+                predicted
+        end
+    end
+
+    return
+        bestHazard,
+        bestLevel,
+        bestCurrent,
+        bestFuture
+end
+
+--------------------------------------------------
+-- RAYCAST
+--------------------------------------------------
+
+local function rayParams(character)
+    local params =
+        RaycastParams.new()
+
+    params.FilterType =
+        Enum.RaycastFilterType.Exclude
+
+    local ignore = {
+        character
+    }
+
+    for _, hazard in pairs(
+        Hazards
+    ) do
+        if hazard.Type == "PART"
+            and hazard.Object
+            and hazard.Object.Parent then
+
+            table.insert(
+                ignore,
+                hazard.Object
+            )
+        end
+    end
+
+    params.FilterDescendantsInstances =
+        ignore
+
+    return params
+end
+
+local function groundAt(
+    position,
+    character
+)
+    local result =
+        Workspace:Raycast(
+            position
+            + Vector3.new(
+                0,
+                13,
+                0
+            ),
+
+            Vector3.new(
+                0,
+                -45,
+                0
+            ),
+
+            rayParams(
+                character
+            )
+        )
+
+    if not result then
+        return nil
+    end
+
+    return Vector3.new(
+        position.X,
+        result.Position.Y + 3,
+        position.Z
+    )
+end
+
+--------------------------------------------------
+-- STATIC WALL CHECK
+--------------------------------------------------
+
+local function staticRouteClear(
+    startPosition,
+    destination,
+    character
+)
+    local delta =
+        destination
+        - startPosition
+
+    if flat(delta).Magnitude < 1 then
+        return true
+    end
+
+    local params =
+        rayParams(
+            character
+        )
+
+    local low =
+        Workspace:Raycast(
+            startPosition
+            + Vector3.new(
+                0,
+                1.3,
+                0
+            ),
+
+            delta,
+
+            params
+        )
+
+    local high =
+        Workspace:Raycast(
+            startPosition
+            + Vector3.new(
+                0,
+                3.5,
+                0
+            ),
+
+            delta,
+
+            params
+        )
+
+    local function blocked(result)
+        return result
+            and result.Instance
+            and result.Instance:
+                IsA("BasePart")
+            and result.Instance.CanCollide
+    end
+
+    return
+        not blocked(low)
+        and not blocked(high)
+end
+
+--------------------------------------------------
+-- WALL SLIDE
+--------------------------------------------------
+
+local function wallSteer(
+    desired,
+    root,
+    character
+)
+    desired = flat(desired)
+
+    if desired.Magnitude < 0.01 then
+        return Vector3.zero
+    end
+
+    desired = desired.Unit
+
+    local params =
+        rayParams(character)
+
+    local hit =
+        Workspace:Raycast(
+            root.Position
+            + Vector3.new(
+                0,
+                2.2,
+                0
+            ),
+
+            desired * 6,
+
+            params
+        )
+
+    if not hit
+        or not hit.Instance
+        or not hit.Instance.CanCollide then
+
+        return desired
+    end
+
+    local normal =
+        flat(hit.Normal)
+
+    if normal.Magnitude > 0.1 then
+        normal = normal.Unit
+
+        local tangent1 =
+            Vector3.new(
+                -normal.Z,
+                0,
+                normal.X
+            )
+
+        local tangent2 =
+            -tangent1
+
+        local chosen
+
+        if tangent1:Dot(
+            desired
+        )
+            > tangent2:Dot(
+                desired
+            ) then
+
+            chosen = tangent1
+        else
+            chosen = tangent2
+        end
+
+        local result =
+            chosen * 0.90
+            + normal * 0.10
+
+        if result.Magnitude > 0.01 then
+            return result.Unit
+        end
+    end
+
+    return desired
+end
+
+--------------------------------------------------
+-- WALL PENALTY
+--------------------------------------------------
+
+local function wallPenalty(
+    position,
+    character
+)
+    local params =
+        rayParams(character)
+
+    local penalty = 0
+
+    local directions = {
+        Vector3.new(1,0,0),
+        Vector3.new(-1,0,0),
+        Vector3.new(0,0,1),
+        Vector3.new(0,0,-1)
+    }
+
+    for _, direction in ipairs(
+        directions
+    ) do
+        local hit =
+            Workspace:Raycast(
+                position
+                + Vector3.new(
+                    0,
+                    2,
+                    0
+                ),
+
+                direction * 5,
+
+                params
+            )
+
+        if hit
+            and hit.Instance
+            and hit.Instance.CanCollide then
+
+            penalty =
+                penalty
+                + math.max(
+                    5 - hit.Distance,
+                    0
+                )
+        end
+    end
+
+    return penalty
+end
+
+--------------------------------------------------
+-- SMART ROUTE TEST
+--
+-- IMPORTANT:
+-- if we're ALREADY inside a hazard,
+-- we're allowed to travel through it until
+-- we've escaped it.
+--------------------------------------------------
+
+local function routeSafe(
+    startPosition,
+    destination,
+    speed
+)
+    local travelDistance =
+        (
+            flat(destination)
+            - flat(startPosition)
+        ).Magnitude
+
+    local eta =
+        travelDistance
+        / math.max(
+            speed,
+            1
+        )
+
+    local minimumClearance =
+        math.huge
+
+    for _, hazard in pairs(
+        Hazards
+    ) do
+        local startDistance =
+            hazardDistance(
+                startPosition,
+                hazard,
+                0
+            )
+
+        local startedInside =
+            startDistance
+            <= BODY_RADIUS
+                + EXIT_EXTRA
+
+        local escaped =
+            not startedInside
+
+        for sample = 1,
+            ROUTE_SAMPLES do
+
+            local alpha =
+                sample
+                / ROUTE_SAMPLES
+
+            local point =
+                startPosition:
+                Lerp(
+                    destination,
+                    alpha
+                )
+
+            local future =
+                math.min(
+                    eta * alpha,
+                    PREDICT_FAR
+                )
+
+            local distance =
+                hazardDistance(
+                    point,
+                    hazard,
+                    future
+                )
+
+            if not escaped then
+                if distance
+                    > BODY_RADIUS
+                        + EXIT_EXTRA then
+
+                    escaped = true
+                end
+
+            else
+                if distance
+                    <= BODY_RADIUS
+                        + ROUTE_EXTRA then
+
+                    return false, 0
+                end
+
+                minimumClearance =
+                    math.min(
+                        minimumClearance,
+                        distance
+                    )
+            end
+        end
+
+        local destinationDistance =
+            hazardDistance(
+                destination,
+                hazard,
+                math.min(
+                    eta,
+                    PREDICT_FAR
+                )
+            )
+
+        if destinationDistance
+            <= BODY_RADIUS
+                + DESTINATION_EXTRA then
+
+            return false, 0
+        end
+
+        if startedInside
+            and not escaped then
+
+            return false, 0
+        end
+    end
+
+    if minimumClearance
+        == math.huge then
+
+        minimumClearance = 50
+    end
+
+    return true,
+        minimumClearance
+end
+
+--------------------------------------------------
+-- THREAT DIRECTION
+--------------------------------------------------
+
+local function threatEscapeDirection(
+    position,
+    hazard
+)
+    if not hazard then
+        return nil
+    end
+
+    if hazard.Type == "PART" then
+        local part =
+            hazard.Object
+
+        if not part
+            or not part.Parent then
+
+            return nil
+        end
+
+        local localPosition =
+            part.CFrame:
+            PointToObjectSpace(
+                position
+            )
+
+        local halfX =
+            part.Size.X / 2
+
+        local halfZ =
+            part.Size.Z / 2
+
+        local exits = {
+            {
+                Distance =
+                    math.abs(
+                        halfX
+                        - localPosition.X
+                    ),
+
+                Direction =
+                    part.CFrame.
+                        RightVector
+            },
+
+            {
+                Distance =
+                    math.abs(
+                        -halfX
+                        - localPosition.X
+                    ),
+
+                Direction =
+                    -part.CFrame.
+                        RightVector
+            },
+
+            {
+                Distance =
+                    math.abs(
+                        halfZ
+                        - localPosition.Z
+                    ),
+
+                Direction =
+                    part.CFrame.
+                        LookVector
+            },
+
+            {
+                Distance =
+                    math.abs(
+                        -halfZ
+                        - localPosition.Z
+                    ),
+
+                Direction =
+                    -part.CFrame.
+                        LookVector
+            }
+        }
+
+        table.sort(
+            exits,
+            function(a, b)
+                return
+                    a.Distance
+                    < b.Distance
+            end
+        )
+
+        return flat(
+            exits[1].
+                Direction
+        ).Unit
+    end
+
+    if hazard.Type == "BEAM" then
+        local beam =
+            hazard.Object
+
+        if not beam
+            or not beam.Attachment0
+            or not beam.Attachment1 then
+
+            return nil
+        end
+
+        local a =
+            hazard.A0
+            or beam.Attachment0.
+                WorldPosition
+
+        local b =
+            hazard.A1
+            or beam.Attachment1.
+                WorldPosition
+
+        a =
+            a
+            + hazard.V0
+                * PREDICT_NEAR
+
+        b =
+            b
+            + hazard.V1
+                * PREDICT_NEAR
+
+        local point =
+            Vector2.new(
+                position.X,
+                position.Z
+            )
+
+        local start =
+            Vector2.new(
+                a.X,
+                a.Z
+            )
+
+        local finish =
+            Vector2.new(
+                b.X,
+                b.Z
+            )
+
+        local line =
+            finish - start
+
+        local length =
+            line:Dot(line)
+
+        if length <= 0.0001 then
+            return nil
+        end
+
+        local t =
+            math.clamp(
+                (point - start):
+                    Dot(line)
+                / length,
+
+                0,
+                1
+            )
+
+        local closest =
+            start
+            + line * t
+
+        local away =
+            Vector3.new(
+                point.X
+                    - closest.X,
+
+                0,
+
+                point.Y
+                    - closest.Y
+            )
+
+        if away.Magnitude > 0.05 then
+            return away.Unit
+        end
+
+        line = line.Unit
+
+        return Vector3.new(
+            -line.Y,
+            0,
+            line.X
+        )
+    end
+
+    return nil
+end
+
+--------------------------------------------------
+-- CANDIDATES
+--------------------------------------------------
+
+local CurrentDodgeDirection =
+    nil
+
+local function candidateDirections(
+    root,
+    threat,
+    enemy
+)
+    local directions = {}
+
+    local function add(direction)
+        direction =
+            flat(direction)
+
+        if direction.Magnitude < 0.05 then
+            return
+        end
+
+        direction = direction.Unit
+
+        for _, existing in ipairs(
+            directions
+        ) do
+            if existing:Dot(
+                direction
+            ) > 0.985 then
+
+                return
+            end
+        end
+
+        table.insert(
+            directions,
+            direction
+        )
+    end
+
+    ------------------------------------------------
+    -- FULL CIRCLE
+    ------------------------------------------------
+
+    for i = 1,
+        DIRECTION_COUNT do
+
+        local angle =
+            (
+                i - 1
+            )
+            / DIRECTION_COUNT
+            * math.pi
+            * 2
+
+        add(
+            Vector3.new(
+                math.cos(angle),
+                0,
+                math.sin(angle)
+            )
+        )
+    end
+
+    ------------------------------------------------
+    -- THREAT-AWARE
+    ------------------------------------------------
+
+    local away =
+        threatEscapeDirection(
+            root.Position,
+            threat
+        )
+
+    if away then
+        add(away)
+
+        add(
+            Vector3.new(
+                -away.Z,
+                0,
+                away.X
+            )
+        )
+
+        add(
+            Vector3.new(
+                away.Z,
+                0,
+                -away.X
+            )
+        )
+    end
+
+    ------------------------------------------------
+    -- KEEP CURRENT DODGE
+    ------------------------------------------------
+
+    if CurrentDodgeDirection then
+        add(
+            CurrentDodgeDirection
+        )
+    end
+
+    ------------------------------------------------
+    -- ENEMY TANGENTS
+    ------------------------------------------------
+
+    if validEnemy(enemy) then
+        local enemyRoot =
+            enemy:FindFirstChild(
+                "HumanoidRootPart"
+            )
+
+        if enemyRoot then
+            local toward =
+                flat(
+                    enemyRoot.Position
+                    - root.Position
+                )
+
+            if toward.Magnitude > 0.05 then
+                toward = toward.Unit
+
+                add(
+                    Vector3.new(
+                        -toward.Z,
+                        0,
+                        toward.X
+                    )
+                )
+
+                add(
+                    Vector3.new(
+                        toward.Z,
+                        0,
+                        -toward.X
+                    )
+                )
+            end
+        end
+    end
+
+    return directions
+end
+
+--------------------------------------------------
+-- SMART ESCAPE
+--------------------------------------------------
+
+local function findEscape(
+    character,
+    root,
+    enemy,
+    threat,
+    soft
+)
+    local directions =
+        candidateDirections(
+            root,
+            threat,
+            enemy
+        )
+
+    local radii
+
+    if soft then
+        radii = EVADE_RADII
+    else
+        radii = DODGE_RADII
+    end
+
+    local options = {}
+
+    for _, direction in ipairs(
+        directions
+    ) do
+        for _, radius in ipairs(
+            radii
+        ) do
+            local candidate =
+                root.Position
+                + direction
+                    * radius
+
+            local safe,
+                clearance =
+                    routeSafe(
+                        root.Position,
+                        candidate,
+
+                        soft
+                        and EVADE_SPEED
+                        or DODGE_SPEED
+                    )
+
+            if safe then
+                local distance =
+                    radius
+
+                local score =
+                    distance * 0.20
+                    - math.min(
+                        clearance,
+                        25
+                    ) * 1.0
+
+                if validEnemy(enemy) then
+                    local enemyRoot =
+                        enemy:FindFirstChild(
+                            "HumanoidRootPart"
+                        )
+
+                    if enemyRoot then
+                        local enemyDistance =
+                            (
+                                flat(candidate)
+                                - flat(
+                                    enemyRoot.Position
+                                )
+                            ).Magnitude
+
+                        if enemyDistance < 8 then
+                            score =
+                                score + 30
+
+                        elseif soft then
+                            score =
+                                score
+                                + math.abs(
+                                    enemyDistance
+                                    - DESIRED_DISTANCE
+                                ) * 0.18
+
+                        elseif enemyDistance > 36 then
+                            score =
+                                score
+                                + (
+                                    enemyDistance
+                                    - 36
+                                ) * 0.4
+                        end
+                    end
+                end
+
+                if CurrentDodgeDirection then
+                    score =
+                        score
+                        - math.max(
+                            direction:Dot(
+                                CurrentDodgeDirection
+                            ),
+                            0
+                        ) * 3
+                end
+
+                table.insert(
+                    options,
+                    {
+                        Point =
+                            candidate,
+
+                        Score =
+                            score
+                    }
+                )
+            end
+        end
+    end
+
+    table.sort(
+        options,
+        function(a, b)
+            return
+                a.Score
+                < b.Score
+        end
+    )
+
+    local checks =
+        math.min(
+            #options,
+            TOP_CANDIDATES
+        )
+
+    local best = nil
+    local bestScore =
+        math.huge
+
+    for index = 1, checks do
+        local option =
+            options[index]
+
+        local grounded =
+            groundAt(
+                option.Point,
+                character
+            )
+
+        if grounded
+            and staticRouteClear(
+                root.Position,
+                grounded,
+                character
+            ) then
+
+            local safe =
+                routeSafe(
+                    root.Position,
+                    grounded,
+
+                    soft
+                    and EVADE_SPEED
+                    or DODGE_SPEED
+                )
+
+            if safe then
+                local score =
+                    option.Score
+                    + wallPenalty(
+                        grounded,
+                        character
+                    )
+
+                if score < bestScore then
+                    bestScore = score
+                    best = grounded
+                end
+            end
+        end
+    end
+
+    return best
+end
+
+--------------------------------------------------
+-- DESTINATION SAFE?
+--------------------------------------------------
+
+local function dodgeDestinationSafe(
+    root,
+    destination,
+    speed
+)
+    if not destination then
+        return false
+    end
+
+    local safe =
+        routeSafe(
+            root.Position,
+            destination,
+            speed
+        )
+
+    return safe == true
+end
+
+--------------------------------------------------
+-- PATHFINDING
+--------------------------------------------------
+
+local Waypoints = nil
+local WaypointIndex = 1
+
+local LastPathBuild = 0
+local PathDestination = nil
+
+local function clearPath()
+    Waypoints = nil
+    WaypointIndex = 1
+    PathDestination = nil
+end
+
+local function buildPath(
+    startPosition,
+    destination,
+    force
+)
+    local now = os.clock()
+
+    if not force
+        and now - LastPathBuild
+            < PATH_RECALC then
+
+        return false
+    end
+
+    LastPathBuild = now
+
+    local path =
+        PathfindingService:
+        CreatePath({
+            AgentRadius = 2.3,
+            AgentHeight = 5,
+            AgentCanJump = true,
+            AgentCanClimb = true,
+            WaypointSpacing = 4
+        })
+
+    local success =
+        pcall(function()
+            path:ComputeAsync(
+                startPosition,
+                destination
+            )
+        end)
+
+    if not success
+        or path.Status
+            ~= Enum.PathStatus.Success then
+
+        clearPath()
+        return false
+    end
+
+    Waypoints =
+        path:GetWaypoints()
+
+    WaypointIndex = 2
+    PathDestination =
+        destination
+
+    return true
+end
+
+local function pathDirection(
+    root,
+    humanoid
+)
+    if not Waypoints then
+        return nil
+    end
+
+    local waypoint =
+        Waypoints[
+            WaypointIndex
+        ]
+
+    if not waypoint then
+        clearPath()
+        return nil
+    end
+
+    if (
+        flat(
+            waypoint.Position
+            - root.Position
+        )
+    ).Magnitude
+        <= WAYPOINT_DISTANCE then
+
+        WaypointIndex =
+            WaypointIndex + 1
+
+        waypoint =
+            Waypoints[
+                WaypointIndex
+            ]
+
+        if not waypoint then
+            clearPath()
+            return nil
+        end
+    end
+
+    if waypoint.Action
+        == Enum.PathWaypointAction.Jump then
+
+        humanoid.Jump = true
+    end
+
+    return flat(
+        waypoint.Position
+        - root.Position
+    )
+end
+
+--------------------------------------------------
+-- FACING
+--------------------------------------------------
+
+local FacingRoot = nil
+local FacingAttachment = nil
+local FacingAlign = nil
+
+local function createFacing(root)
+    if FacingRoot == root
+        and FacingAlign
+        and FacingAlign.Parent then
+
+        return
+    end
+
+    if FacingAlign then
+        pcall(function()
+            FacingAlign:Destroy()
+        end)
+    end
+
+    if FacingAttachment then
+        pcall(function()
+            FacingAttachment:
+                Destroy()
+        end)
+    end
+
+    FacingAttachment =
+        Instance.new(
+            "Attachment"
+        )
+
+    FacingAttachment.Name =
+        "DQ_V71_FacingAttachment"
+
+    FacingAttachment.Parent =
+        root
+
+    FacingAlign =
+        Instance.new(
+            "AlignOrientation"
+        )
+
+    FacingAlign.Name =
+        "DQ_V71_Facing"
+
+    FacingAlign.Mode =
+        Enum.OrientationAlignmentMode.
+            OneAttachment
+
+    FacingAlign.Attachment0 =
+        FacingAttachment
+
+    FacingAlign.RigidityEnabled =
+        true
+
+    FacingAlign.Responsiveness =
+        200
+
+    FacingAlign.MaxTorque =
+        1000000000
+
+    FacingAlign.MaxAngularVelocity =
+        100
+
+    FacingAlign.Parent =
+        root
+
+    FacingRoot = root
+end
+
+local function faceTarget(
+    root,
+    target
+)
+    createFacing(root)
+
+    if not validEnemy(target) then
+        FacingAlign.Enabled = false
+        return false
+    end
+
+    local enemyRoot =
+        target:FindFirstChild(
+            "HumanoidRootPart"
+        )
+
+    if not enemyRoot then
+        FacingAlign.Enabled = false
+        return false
+    end
+
+    local direction =
+        flat(
+            enemyRoot.Position
+            - root.Position
+        )
+
+    if direction.Magnitude < 0.05 then
+        return true
+    end
+
+    direction = direction.Unit
+
+    FacingAlign.Enabled = true
+
+    FacingAlign.CFrame =
+        CFrame.lookAt(
+            Vector3.zero,
+            direction
+        )
+
+    local current =
+        flat(
+            root.CFrame.
+                LookVector
+        )
+
+    if current.Magnitude < 0.05 then
+        return false
+    end
+
+    return
+        current.Unit:
+        Dot(direction)
+        >= FACE_DOT_REQUIRED
+end
+
+--------------------------------------------------
+-- Q / E
+--------------------------------------------------
+
+local LastQ = 0
+local LastE = 0
+
+local KeyBusy = {}
+
+local function pressKey(
+    key,
+    fallback
+)
+    if KeyBusy[key] then
+        return
+    end
+
+    KeyBusy[key] = true
+
+    task.spawn(function()
+        local success =
+            pcall(function()
+                VirtualInputManager:
+                    SendKeyEvent(
+                        true,
+                        key,
+                        false,
+                        game
+                    )
+
+                task.wait(0.035)
+
+                VirtualInputManager:
+                    SendKeyEvent(
+                        false,
+                        key,
+                        false,
+                        game
+                    )
+            end)
+
+        if not success
+            and keypress
+            and keyrelease then
+
+            pcall(function()
+                keypress(fallback)
+                task.wait(0.035)
+                keyrelease(fallback)
+            end)
+        end
+
+        KeyBusy[key] = nil
+    end)
+end
+
+local function useAbilities(
+    target,
+    distance,
+    facing,
+    mode
+)
+    if not validEnemy(target)
+        or not facing
+        or distance > ABILITY_RANGE
+        or mode == "DODGE" then
+
+        return
+    end
+
+    local now = os.clock()
+
+    if AUTO_Q
+        and now - LastQ
+            >= Q_INTERVAL then
+
+        LastQ = now
+
+        pressKey(
+            Enum.KeyCode.Q,
+            0x51
+        )
+    end
+
+    if AUTO_E
+        and now - LastE
+            >= E_INTERVAL then
+
+        LastE = now
+
+        pressKey(
+            Enum.KeyCode.E,
+            0x45
+        )
+    end
+end
+
+--------------------------------------------------
+-- AI STATE
+--------------------------------------------------
+
+local Mode = "STARTING"
+
+local Target = nil
+local TargetDistance =
+    math.huge
+
+local DesiredDirection =
+    Vector3.zero
+
+local DesiredSpeed =
+    CHASE_SPEED
+
+local FacingOkay = false
+
+local ThreatLevel = "NONE"
+local ThreatKind = "NONE"
+
+local ThreatCurrent =
+    math.huge
+
+local ThreatFuture =
+    math.huge
+
+local DodgePoint = nil
+local DodgeUntil = 0
+local LastDodgePlan = 0
+
+local EvadePoint = nil
+local LastEvadePlan = 0
+
+local OrbitSide = 1
+
+local BlockedSince = nil
+
+--------------------------------------------------
+-- STUCK
+--------------------------------------------------
+
+local LastPosition = nil
+local LastPositionTime =
+    os.clock()
+
+local StuckCount = 0
+
+local function stuckCheck(root)
+    local now = os.clock()
+
+    if not LastPosition then
+        LastPosition =
+            root.Position
+
+        LastPositionTime =
+            now
+
+        return false
+    end
+
+    if now - LastPositionTime
+        < STUCK_INTERVAL then
+
+        return false
+    end
+
+    local moved =
+        (
+            flat(root.Position)
+            - flat(LastPosition)
+        ).Magnitude
+
+    LastPosition =
+        root.Position
+
+    LastPositionTime =
+        now
+
+    if DesiredDirection.Magnitude
+        > 0.3
+        and moved < MIN_PROGRESS
+        and Mode ~= "ORBIT"
+        and Mode ~= "DODGE"
+        and Mode ~= "EVADE" then
+
+        StuckCount =
+            StuckCount + 1
+
+        return true
+    end
+
+    if moved >= MIN_PROGRESS then
+        StuckCount = 0
+    end
+
+    return false
+end
+
+--------------------------------------------------
+-- MAIN AI
+--------------------------------------------------
+
+connect(
+    RunService.Heartbeat,
+    function()
+        if not State.Alive then
+            return
+        end
+
+        updateHazards()
+
+        local character,
+            root,
+            humanoid =
+                getCharacter()
+
+        if not root then
+            return
+        end
+
+        if not ENABLED then
+            Mode = "OFF"
+
+            DesiredDirection =
+                Vector3.zero
+
+            return
+        end
+
+        --------------------------------------------------
+        -- TARGET IMMEDIATELY
+        --------------------------------------------------
+
+        Target,
+            TargetDistance =
+                chooseTarget(
+                    root.Position,
+                    Target
+                )
+
+        if Target then
+            local order =
+                enemyRoomOrder(
+                    Target
+                )
+
+            if order then
+                LastRoomOrder =
+                    math.max(
+                        LastRoomOrder,
+                        order
+                    )
+            end
+        end
+
+        --------------------------------------------------
+        -- THREAT
+        --------------------------------------------------
+
+        local threat,
+            level,
+            currentDistance,
+            futureDistance =
+                getThreat(
+                    root.Position
+                )
+
+        ThreatLevel =
+            level or "NONE"
+
+        ThreatKind =
+            threat
+            and threat.Kind
+            or "NONE"
+
+        ThreatCurrent =
+            currentDistance
+
+        ThreatFuture =
+            futureDistance
+
+        local now = os.clock()
+
+        --------------------------------------------------
+        -- EMERGENCY
+        --------------------------------------------------
+
+        if level == "EMERGENCY" then
+            local needsPlan =
+                not DodgePoint
+
+            if DodgePoint
+                and not dodgeDestinationSafe(
+                    root,
+                    DodgePoint,
+                    DODGE_SPEED
+                ) then
+
+                needsPlan = true
+            end
+
+            if needsPlan
+                and now - LastDodgePlan
+                    >= DODGE_REPLAN then
+
+                local point =
+                    findEscape(
+                        character,
+                        root,
+                        Target,
+                        threat,
+                        false
+                    )
+
+                if point then
+                    DodgePoint = point
+
+                    local direction =
+                        flat(
+                            point
+                            - root.Position
+                        )
+
+                    if direction.Magnitude > 0.05 then
+                        CurrentDodgeDirection =
+                            direction.Unit
+                    end
+                end
+
+                LastDodgePlan = now
+            end
+
+            DodgeUntil =
+                math.max(
+                    DodgeUntil,
+                    now + DODGE_LOCK
+                )
+
+            --------------------------------------------------
+            -- EVEN IF SOLVER FAILS, NEVER FREEZE
+            --------------------------------------------------
+
+            if not DodgePoint then
+                Mode = "DODGE"
+                DesiredSpeed = DODGE_SPEED
+
+                local fallback =
+                    threatEscapeDirection(
+                        root.Position,
+                        threat
+                    )
+
+                if not fallback
+                    and Target
+                    and validEnemy(Target) then
+
+                    local enemyRoot =
+                        Target:FindFirstChild(
+                            "HumanoidRootPart"
+                        )
+
+                    if enemyRoot then
+                        local toward =
+                            flat(
+                                enemyRoot.Position
+                                - root.Position
+                            )
+
+                        if toward.Magnitude > 0.05 then
+                            toward = toward.Unit
+
+                            fallback =
+                                Vector3.new(
+                                    -toward.Z,
+                                    0,
+                                    toward.X
+                                )
+                                * OrbitSide
+                        end
+                    end
+                end
+
+                if fallback then
+                    CurrentDodgeDirection =
+                        fallback.Unit
+
+                    DesiredDirection =
+                        wallSteer(
+                            fallback,
+                            root,
+                            character
+                        )
+                end
+
+                return
+            end
+        end
+
+        --------------------------------------------------
+        -- COMMITTED DODGE
+        --------------------------------------------------
+
+        if DodgePoint
+            and (
+                now < DodgeUntil
+                or level == "EMERGENCY"
+            ) then
+
+            Mode = "DODGE"
+            DesiredSpeed = DODGE_SPEED
+
+            if not dodgeDestinationSafe(
+                root,
+                DodgePoint,
+                DODGE_SPEED
+            )
+                and now - LastDodgePlan
+                    >= DODGE_REPLAN then
+
+                local newPoint =
+                    findEscape(
+                        character,
+                        root,
+                        Target,
+                        threat,
+                        false
+                    )
+
+                if newPoint then
+                    DodgePoint = newPoint
+
+                    local direction =
+                        flat(
+                            newPoint
+                            - root.Position
+                        )
+
+                    if direction.Magnitude > 0.05 then
+                        CurrentDodgeDirection =
+                            direction.Unit
+                    end
+                end
+
+                LastDodgePlan = now
+            end
+
+            local delta =
+                flat(
+                    DodgePoint
+                    - root.Position
+                )
+
+            if delta.Magnitude > 2.2 then
+                DesiredDirection =
+                    wallSteer(
+                        delta,
+                        root,
+                        character
+                    )
+
+                return
+            end
+
+            if level ~= "EMERGENCY" then
+                DodgePoint = nil
+                CurrentDodgeDirection = nil
+            end
+
+        else
+            DodgePoint = nil
+
+            if level ~= "EMERGENCY" then
+                CurrentDodgeDirection = nil
+            end
+        end
+
+        --------------------------------------------------
+        -- WARNING
+        --
+        -- DO NOT RUN FROM BOSS.
+        -- Reposition while staying aggressive.
+        --------------------------------------------------
+
+        if level == "WARNING" then
+            Mode = "EVADE"
+            DesiredSpeed = EVADE_SPEED
+
+            local replan =
+                not EvadePoint
+
+            if EvadePoint
+                and not dodgeDestinationSafe(
+                    root,
+                    EvadePoint,
+                    EVADE_SPEED
+                ) then
+
+                replan = true
+            end
+
+            if EvadePoint
+                and (
+                    flat(
+                        EvadePoint
+                        - root.Position
+                    )
+                ).Magnitude < 2.5 then
+
+                replan = true
+            end
+
+            if replan
+                and now - LastEvadePlan
+                    >= EVADE_REPLAN then
+
+                EvadePoint =
+                    findEscape(
+                        character,
+                        root,
+                        Target,
+                        threat,
+                        true
+                    )
+
+                LastEvadePlan = now
+            end
+
+            if EvadePoint then
+                DesiredDirection =
+                    wallSteer(
+                        EvadePoint
+                        - root.Position,
+
+                        root,
+                        character
+                    )
+
+                return
+            end
+
+            --------------------------------------------------
+            -- FALLBACK STRAFE
+            --------------------------------------------------
+
+            if validEnemy(Target) then
+                local enemyRoot =
+                    Target:FindFirstChild(
+                        "HumanoidRootPart"
+                    )
+
+                if enemyRoot then
+                    local toward =
+                        flat(
+                            enemyRoot.Position
+                            - root.Position
+                        )
+
+                    if toward.Magnitude > 0.05 then
+                        local radial =
+                            toward.Unit
+
+                        local tangent =
+                            Vector3.new(
+                                -radial.Z,
+                                0,
+                                radial.X
+                            )
+                            * OrbitSide
+
+                        local away =
+                            threatEscapeDirection(
+                                root.Position,
+                                threat
+                            )
+
+                        local movement =
+                            tangent
+
+                        if away then
+                            movement =
+                                movement
+                                + away * 0.55
+                        end
+
+                        if TargetDistance
+                            > DESIRED_DISTANCE + 7 then
+
+                            movement =
+                                movement
+                                + radial * 0.55
+                        end
+
+                        DesiredDirection =
+                            wallSteer(
+                                movement,
+                                root,
+                                character
+                            )
+
+                        return
+                    end
+                end
+            end
+
+        else
+            EvadePoint = nil
+        end
+
+        --------------------------------------------------
+        -- NO TARGET
+        --------------------------------------------------
+
+        if not Target then
+            fallbackEnemyScan()
+
+            local room =
+                findNextRoom(
+                    LastRoomOrder
+                )
+
+            local point =
+                roomProgressPoint(
+                    room,
+                    root.Position
+                )
+
+            if point then
+                Mode = "NEXT ROOM"
+                DesiredSpeed = NEXT_ROOM_SPEED
+
+                local delta =
+                    flat(
+                        point.Position
+                        - root.Position
+                    )
+
+                if delta.Magnitude > 2.5 then
+                    if staticRouteClear(
+                        root.Position,
+                        point.Position,
+                        character
+                    ) then
+
+                        clearPath()
+
+                        DesiredDirection =
+                            wallSteer(
+                                delta,
+                                root,
+                                character
+                            )
+
+                    else
+                        local pathChanged =
+                            not PathDestination
+                            or (
+                                flat(
+                                    PathDestination
+                                    - point.Position
+                                )
+                            ).Magnitude > 6
+
+                        if pathChanged
+                            or not Waypoints then
+
+                            buildPath(
+                                root.Position,
+                                point.Position,
+                                true
+                            )
+                        end
+
+                        local direction =
+                            pathDirection(
+                                root,
+                                humanoid
+                            )
+
+                        if direction then
+                            DesiredDirection =
+                                wallSteer(
+                                    direction,
+                                    root,
+                                    character
+                                )
+                        else
+                            DesiredDirection =
+                                wallSteer(
+                                    delta,
+                                    root,
+                                    character
+                                )
+                        end
+                    end
+                else
+                    DesiredDirection =
+                        Vector3.zero
+                end
+
+                if stuckCheck(root) then
+                    buildPath(
+                        root.Position,
+                        point.Position,
+                        true
+                    )
+                end
+
+                return
+            end
+
+            Mode = "SCANNING"
+            DesiredSpeed = NEXT_ROOM_SPEED
+            DesiredDirection = Vector3.zero
+
+            return
+        end
+
+        --------------------------------------------------
+        -- ENEMY MOVEMENT
+        --------------------------------------------------
+
+        local enemyRoot =
+            Target:FindFirstChild(
+                "HumanoidRootPart"
+            )
+
+        if not enemyRoot then
+            return
+        end
+
+        local toward =
+            flat(
+                enemyRoot.Position
+                - root.Position
+            )
+
+        --------------------------------------------------
+        -- STUCK
+        --------------------------------------------------
+
+        if stuckCheck(root) then
+            buildPath(
+                root.Position,
+                enemyRoot.Position,
+                true
+            )
+        end
+
+        --------------------------------------------------
+        -- PROACTIVE PATH AROUND WALLS
+        --------------------------------------------------
+
+        if TargetDistance
+            > DESIRED_DISTANCE + 3 then
+
+            local direct =
+                staticRouteClear(
+                    root.Position,
+                    enemyRoot.Position,
+                    character
+                )
+
+            if not direct then
+                if not BlockedSince then
+                    BlockedSince = now
+                end
+
+                if now - BlockedSince
+                    >= BLOCKED_DELAY then
+
+                    local changed =
+                        not PathDestination
+                        or (
+                            flat(
+                                PathDestination
+                                - enemyRoot.Position
+                            )
+                        ).Magnitude > 7
+
+                    if changed
+                        or not Waypoints then
+
+                        buildPath(
+                            root.Position,
+                            enemyRoot.Position,
+                            changed
+                        )
+                    end
+
+                    local direction =
+                        pathDirection(
+                            root,
+                            humanoid
+                        )
+
+                    if direction then
+                        Mode = "PATH"
+                        DesiredSpeed = PATH_SPEED
+
+                        DesiredDirection =
+                            wallSteer(
+                                direction,
+                                root,
+                                character
+                            )
+
+                        return
+                    end
+                end
+
+            else
+                BlockedSince = nil
+
+                if StuckCount == 0 then
+                    clearPath()
+                end
+            end
+
+        else
+            BlockedSince = nil
+        end
+
+        --------------------------------------------------
+        -- CHASE
+        --------------------------------------------------
+
+        if TargetDistance
+            > DESIRED_DISTANCE + 4 then
+
+            Mode = "CHASE"
+            DesiredSpeed = CHASE_SPEED
+
+            DesiredDirection =
+                wallSteer(
+                    toward,
+                    root,
+                    character
+                )
+
+        --------------------------------------------------
+        -- TOO CLOSE
+        --------------------------------------------------
+
+        elseif TargetDistance
+            < TOO_CLOSE_DISTANCE then
+
+            Mode = "SPACE"
+            DesiredSpeed = SPACE_SPEED
+
+            local radial =
+                toward.Unit
+
+            local tangent =
+                Vector3.new(
+                    -radial.Z,
+                    0,
+                    radial.X
+                )
+                * OrbitSide
+
+            DesiredDirection =
+                wallSteer(
+                    -radial * 0.80
+                    + tangent * 0.30,
+
+                    root,
+                    character
+                )
+
+        --------------------------------------------------
+        -- ATTACK ORBIT
+        --------------------------------------------------
+
+        else
+            Mode = "ORBIT"
+            DesiredSpeed = ORBIT_SPEED
+
+            local radial =
+                toward.Unit
+
+            local tangent =
+                Vector3.new(
+                    -radial.Z,
+                    0,
+                    radial.X
+                )
+                * OrbitSide
+
+            local correction =
+                math.clamp(
+                    (
+                        TargetDistance
+                        - DESIRED_DISTANCE
+                    ) / 7,
+
+                    -0.35,
+                    0.35
+                )
+
+            DesiredDirection =
+                wallSteer(
+                    tangent
+                    + radial
+                        * correction,
+
+                    root,
+                    character
+                )
+        end
+    end
+)
+
+--------------------------------------------------
+-- MOVEMENT + FACING
+--------------------------------------------------
+
+RunService:BindToRenderStep(
+    State.RenderName,
+
+    Enum.RenderPriority.Character.Value + 2,
+
+    function()
+        if not State.Alive then
+            return
+        end
+
+        local character,
+            root,
+            humanoid =
+                getCharacter()
+
+        if not root then
+            return
+        end
+
+        if not ENABLED then
+            humanoid.AutoRotate = true
+
+            humanoid:Move(
+                Vector3.zero,
+                false
+            )
+
+            if FacingAlign then
+                FacingAlign.Enabled =
+                    false
+            end
+
+            return
+        end
+
+        humanoid.WalkSpeed =
+            math.clamp(
+                DesiredSpeed,
+                0,
+                MAX_SPEED
+            )
+
+        humanoid.AutoRotate = false
+
+        humanoid:Move(
+            DesiredDirection,
+            false
+        )
+
+        --------------------------------------------------
+        -- ALWAYS FACE ENEMY
+        --------------------------------------------------
+
+        FacingOkay =
+            faceTarget(
+                root,
+                Target
+            )
+
+        --------------------------------------------------
+        -- STILL ATTACK WHILE EVADE
+        --------------------------------------------------
+
+        useAbilities(
+            Target,
+            TargetDistance,
+            FacingOkay,
+            Mode
+        )
+    end
+)
+
+--------------------------------------------------
+-- ORBIT SWITCH
+--------------------------------------------------
+
+task.spawn(function()
+    while State.Alive do
+        task.wait(4)
+
+        if Mode == "ORBIT"
+            or Mode == "EVADE" then
+
+            OrbitSide =
+                -OrbitSide
+        end
+    end
+end)
+
+--------------------------------------------------
+-- GUI
+--------------------------------------------------
+
+local gui =
+    Instance.new(
+        "ScreenGui"
+    )
+
+gui.Name =
+    "DQCombatV71"
+
+gui.ResetOnSpawn =
+    false
+
+pcall(function()
+    gui.Parent =
+        CoreGui
+end)
+
+if not gui.Parent then
+    gui.Parent =
+        LP:WaitForChild(
+            "PlayerGui"
+        )
+end
+
+local frame =
+    Instance.new("Frame")
+
+frame.Size =
+    UDim2.fromOffset(
+        260,
+        250
+    )
+
+frame.Position =
+    UDim2.new(
+        0,
+        18,
+        0.42,
+        0
+    )
+
+frame.BackgroundColor3 =
+    Color3.fromRGB(
+        20,
+        21,
+        29
+    )
+
+frame.BorderSizePixel = 0
+frame.Active = true
+frame.Draggable = true
+frame.Parent = gui
+
+Instance.new(
+    "UICorner",
+    frame
+).CornerRadius =
+    UDim.new(0, 10)
+
+--------------------------------------------------
+-- MAIN BUTTON
+--------------------------------------------------
+
+local main =
+    Instance.new(
+        "TextButton"
+    )
+
+main.Size =
+    UDim2.new(
+        1,
+        -12,
+        0,
+        38
+    )
+
+main.Position =
+    UDim2.fromOffset(
+        6,
+        6
+    )
+
+main.BackgroundColor3 =
+    Color3.fromRGB(
+        55,
+        170,
+        92
+    )
+
+main.TextColor3 =
+    Color3.new(
+        1,
+        1,
+        1
+    )
+
+main.Font =
+    Enum.Font.GothamBold
+
+main.TextSize = 13
+
+main.Text =
+    "COMBAT PILOT V7.1: ON"
+
+main.Parent =
+    frame
+
+Instance.new(
+    "UICorner",
+    main
+).CornerRadius =
+    UDim.new(0, 8)
+
+--------------------------------------------------
+-- Q / E
+--------------------------------------------------
+
+local qButton =
+    Instance.new(
+        "TextButton"
+    )
+
+qButton.Size =
+    UDim2.fromOffset(
+        112,
+        30
+    )
+
+qButton.Position =
+    UDim2.fromOffset(
+        6,
+        50
+    )
+
+qButton.Text =
+    "AUTO Q: ON"
+
+qButton.Font =
+    Enum.Font.GothamBold
+
+qButton.TextSize = 11
+qButton.Parent = frame
+
+local eButton =
+    qButton:Clone()
+
+eButton.Position =
+    UDim2.fromOffset(
+        140,
+        50
+    )
+
+eButton.Text =
+    "AUTO E: ON"
+
+eButton.Parent = frame
+
+--------------------------------------------------
+-- STATUS
+--------------------------------------------------
+
+local status =
+    Instance.new(
+        "TextLabel"
+    )
+
+status.Size =
+    UDim2.new(
+        1,
+        -12,
+        0,
+        160
+    )
+
+status.Position =
+    UDim2.fromOffset(
+        6,
+        86
+    )
+
+status.BackgroundTransparency =
+    1
+
+status.TextColor3 =
+    Color3.fromRGB(
+        215,
+        215,
+        225
+    )
+
+status.Font =
+    Enum.Font.Code
+
+status.TextSize = 11
+
+status.TextXAlignment =
+    Enum.TextXAlignment.Left
+
+status.TextYAlignment =
+    Enum.TextYAlignment.Top
+
+status.Parent =
+    frame
+
+--------------------------------------------------
+-- BUTTONS
+--------------------------------------------------
+
+local function refreshButtons()
+    qButton.Text =
+        "AUTO Q: "
+        .. (
+            AUTO_Q
+            and "ON"
+            or "OFF"
+        )
+
+    eButton.Text =
+        "AUTO E: "
+        .. (
+            AUTO_E
+            and "ON"
+            or "OFF"
+        )
+end
+
+main.MouseButton1Click:
+Connect(function()
+    ENABLED = not ENABLED
+
+    main.Text =
+        "COMBAT PILOT V7.1: "
+        .. (
+            ENABLED
+            and "ON"
+            or "OFF"
+        )
+
+    DesiredDirection =
+        Vector3.zero
+end)
+
+qButton.MouseButton1Click:
+Connect(function()
+    AUTO_Q = not AUTO_Q
+    refreshButtons()
+end)
+
+eButton.MouseButton1Click:
+Connect(function()
+    AUTO_E = not AUTO_E
+    refreshButtons()
+end)
+
+--------------------------------------------------
+-- STATUS UPDATE
+--------------------------------------------------
+
+local lastStatusUpdate = 0
+
+connect(
+    RunService.RenderStepped,
+    function()
+        local now = os.clock()
+
+        if now - lastStatusUpdate < 0.10 then
+            return
+        end
+
+        lastStatusUpdate = now
+
+        local hazards = 0
+        local lasers = 0
+        local projectiles = 0
+        local enemies = 0
+
+        for _, hazard in pairs(
+            Hazards
+        ) do
+            hazards =
+                hazards + 1
+
+            if hazard.Kind
+                == "LASER" then
+
+                lasers =
+                    lasers + 1
+
+            elseif hazard.Kind
+                == "PROJECTILE" then
+
+                projectiles =
+                    projectiles + 1
+            end
+        end
+
+        for enemy in pairs(
+            Enemies
+        ) do
+            if validEnemy(enemy) then
+                enemies =
+                    enemies + 1
+            end
+        end
+
+        local current =
+            ThreatCurrent
+                ~= math.huge
+            and string.format(
+                "%.1f",
+                ThreatCurrent
+            )
+            or "-"
+
+        local future =
+            ThreatFuture
+                ~= math.huge
+            and string.format(
+                "%.1f",
+                ThreatFuture
+            )
+            or "-"
+
+        status.Text =
+            "Mode: "
+            .. Mode
+
+            .. "\nTarget: "
+            .. (
+                Target
+                and Target.Name
+                or "NONE"
+            )
+
+            .. "\nDistance: "
+            .. (
+                TargetDistance
+                    ~= math.huge
+                and string.format(
+                    "%.1f",
+                    TargetDistance
+                )
+                or "-"
+            )
+
+            .. "\nFacing: "
+            .. (
+                FacingOkay
+                and "YES"
+                or "TURNING"
+            )
+
+            .. "\nThreat: "
+            .. ThreatLevel
+            .. " / "
+            .. ThreatKind
+
+            .. "\nDanger now/future: "
+            .. current
+            .. " / "
+            .. future
+
+            .. "\nHazards: "
+            .. hazards
+            .. " | Lasers:"
+            .. lasers
+            .. " | Proj:"
+            .. projectiles
+
+            .. "\nEnemies: "
+            .. enemies
+            .. " | Room:"
+            .. tostring(
+                LastRoomOrder
+            )
+
+            .. "\nPath: "
+            .. (
+                Waypoints
+                and "YES"
+                or "NO"
+            )
+
+            .. " | Stuck:"
+            .. tostring(
+                StuckCount
+            )
+    end
+)
+
+refreshButtons()
+
+print(
+    "Dungeon Quest Combat Pilot V7.1 STABLE loaded"
+)
