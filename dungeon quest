@@ -23,6 +23,9 @@ local ENV = (getgenv and getgenv()) or _G
 local ENABLED = true
 local AUTO_Q = true
 local AUTO_E = true
+local AUTO_START = false
+local AUTO_REPLAY = false
+local AUTO_LOBBY = false
 
 local MAX_SPEED = 20
 
@@ -43,6 +46,10 @@ local LEASH_INWARD_START = 4
 local LEASH_MAX_INWARD = 0.72
 
 local ABILITY_RANGE = 75
+local REMOTE_ABILITY_RANGE = 160
+local REMOTE_PROGRESS_TIMEOUT = 1.35
+local REMOTE_PROGRESS_STEP = 2.0
+local REMOTE_CAST_HOLD = 5.0
 local FACE_DOT_REQUIRED = 0.93
 
 local Q_INTERVAL = 0.50
@@ -62,14 +69,18 @@ local HAZARD_UPDATE_INTERVAL = 0.025
 local PLAYER_MOTION_PREDICTION = 0.65
 local MAX_ACCEL_PREDICT_OFFSET = 8
 local MAX_SIZE_ACCELERATION = 48
+local THREAT_PREDICTION_SAMPLES = 7
+local EMERGENCY_IMPACT_TIME = 0.28
+local FAST_HAZARD_SPEED = 28
+local FAST_WARNING_EXTRA = 3.5
 
 local EXPAND_RATE_MIN = 1.25
 local EXPAND_WARNING_EXTRA = 9.5
 local EXPAND_EMERGENCY_EXTRA = 3.0
 local EXPAND_OUTWARD_WEIGHT = 0.32
 
-local WARNING_EXTRA = 5.5
-local EMERGENCY_EXTRA = 1.5
+local WARNING_EXTRA = 7.0
+local EMERGENCY_EXTRA = 2.2
 
 local EXIT_EXTRA = 0.8
 local ROUTE_EXTRA = 1.2
@@ -96,9 +107,10 @@ local VISUAL_LIFE = 0.35
 --------------------------------------------------
 
 local DODGE_LOCK = 0.36
-local DODGE_REPLAN = 0.09
-local EVADE_REPLAN = 0.12
+local DODGE_REPLAN = 0.05
+local EVADE_REPLAN = 0.07
 local DODGE_SIDE_RELEASE = 0.65
+local QUICK_DODGE_DISTANCE = 10
 
 local DODGE_RADII = {
     8,
@@ -156,6 +168,12 @@ local function stopOld(name)
             RunService:UnbindFromRenderStep(
                 old.RenderName
             )
+        end)
+    end
+
+    if old.Interface then
+        pcall(function()
+            old.Interface:Destroy()
         end)
     end
 end
@@ -925,6 +943,41 @@ local function classifyPart(
             "explosion",
             1,
             true
+        )
+        or blob:find(
+            "circle",
+            1,
+            true
+        )
+        or blob:find(
+            "cricle",
+            1,
+            true
+        )
+        or blob:find(
+            "damage",
+            1,
+            true
+        )
+        or blob:find(
+            "danger",
+            1,
+            true
+        )
+        or blob:find(
+            "meteor",
+            1,
+            true
+        )
+        or blob:find(
+            "sweep",
+            1,
+            true
+        )
+        or blob:find(
+            "cone",
+            1,
+            true
         ) then
 
         return "ATTACK"
@@ -1176,6 +1229,51 @@ end
 -- NEW WORKSPACE OBJECTS
 --------------------------------------------------
 
+local function discoverNewHazardPart(part)
+    local kind =
+        classifyPart(
+            part,
+            true
+        )
+
+    if kind then
+        registerHazardPart(
+            part,
+            kind
+        )
+
+        return
+    end
+
+    task.spawn(function()
+        for _ = 1, 7 do
+            task.wait(0.03)
+
+            if not State.Alive
+                or not part.Parent
+                or Hazards[part] then
+
+                return
+            end
+
+            local delayedKind =
+                classifyPart(
+                    part,
+                    true
+                )
+
+            if delayedKind then
+                registerHazardPart(
+                    part,
+                    delayedKind
+                )
+
+                return
+            end
+        end
+    end)
+end
+
 connect(
     Workspace.DescendantAdded,
     function(object)
@@ -1183,18 +1281,9 @@ connect(
             "BasePart"
         ) then
 
-            local kind =
-                classifyPart(
-                    object,
-                    true
-                )
-
-            if kind then
-                registerHazardPart(
-                    object,
-                    kind
-                )
-            end
+            discoverNewHazardPart(
+                object
+            )
 
         elseif object:IsA(
             "Beam"
@@ -1771,6 +1860,31 @@ end
 -- FIND MAIN THREAT
 --------------------------------------------------
 
+local function hazardSpeed(hazard)
+    if hazard.Type == "PART" then
+        return flat(
+            hazard.Velocity
+            or Vector3.zero
+        ).Magnitude
+    end
+
+    if hazard.Type == "BEAM" then
+        return math.max(
+            flat(
+                hazard.V0
+                or Vector3.zero
+            ).Magnitude,
+
+            flat(
+                hazard.V1
+                or Vector3.zero
+            ).Magnitude
+        )
+    end
+
+    return 0
+end
+
 local function getThreat(
     position,
     playerVelocity
@@ -1842,25 +1956,77 @@ local function getThreat(
                 PREDICT_NEAR
             )
 
-        local farFuture =
-            hazardDistance(
-                position
-                    + playerVelocity
-                        * expansionHorizon
-                        * PLAYER_MOTION_PREDICTION,
-
-                hazard,
-                expansionHorizon
-            )
-
         local predicted =
             math.min(
-                nearFuture,
-                farFuture
+                current,
+                nearFuture
             )
+
+        local impactTime = nil
+
+        local impactClearance =
+            BODY_RADIUS
+            + 1.0
+            + (
+                bobStyleCircle
+                and EXPAND_EMERGENCY_EXTRA
+                or 0
+            )
+
+        for sample = 1,
+            THREAT_PREDICTION_SAMPLES do
+
+            local future =
+                expansionHorizon
+                * sample
+                / THREAT_PREDICTION_SAMPLES
+
+            local futurePosition =
+                position
+                + playerVelocity
+                    * future
+                    * PLAYER_MOTION_PREDICTION
+
+            local distance =
+                hazardDistance(
+                    futurePosition,
+                    hazard,
+                    future
+                )
+
+            predicted =
+                math.min(
+                    predicted,
+                    distance
+                )
+
+            if not impactTime
+                and distance
+                    <= impactClearance then
+
+                impactTime = future
+            end
+        end
+
+        hazard.TimeToImpact =
+            impactTime
 
         local closing =
             current - predicted
+
+        local speed =
+            hazardSpeed(hazard)
+
+        local fastFactor =
+            math.clamp(
+                (
+                    speed
+                    - FAST_HAZARD_SPEED
+                ) / FAST_HAZARD_SPEED,
+
+                0,
+                1
+            )
 
         local emergency =
             current
@@ -1879,6 +2045,9 @@ local function getThreat(
                         and EXPAND_EMERGENCY_EXTRA
                         or 0
                     )
+            or impactTime
+                and impactTime
+                    <= EMERGENCY_IMPACT_TIME
 
         local warning =
             false
@@ -1895,14 +2064,8 @@ local function getThreat(
                                 and 3.5
                                 or 0
                         )
-                and (
-                    closing > 0.20
-                    or current
-                        <= BODY_RADIUS + 3
-                    or hazard.Kind
-                        == "PRECAST"
-                    or hazard.Expanding
-                )
+                        + fastFactor
+                            * FAST_WARNING_EXTRA
         end
 
         local level = nil
@@ -1915,6 +2078,10 @@ local function getThreat(
                 -1000
                 + predicted
                 + current
+                + (
+                    impactTime
+                    or expansionHorizon
+                ) * 18
 
         elseif warning then
             level = "WARNING"
@@ -1927,6 +2094,10 @@ local function getThreat(
                     closing,
                     0
                 ) * 3
+                + (
+                    impactTime
+                    or expansionHorizon
+                ) * 8
         end
 
         if score
@@ -2909,6 +3080,136 @@ local function committedLateralFallback(
     return CurrentDodgeDirection
 end
 
+local function quickDodgeDirection(
+    character,
+    root,
+    enemy,
+    threat
+)
+    local directions =
+        candidateDirections(
+            root,
+            threat,
+            enemy
+        )
+
+    local away =
+        threatEscapeDirection(
+            root.Position,
+            threat
+        )
+
+    local bestDirection = nil
+    local bestSide = nil
+    local bestScore = -math.huge
+
+    for _, entry in ipairs(
+        directions
+    ) do
+        local destination =
+            root.Position
+            + entry.Direction
+                * QUICK_DODGE_DISTANCE
+
+        local safe,
+            clearance =
+                routeSafe(
+                    root.Position,
+                    destination,
+                    DODGE_SPEED
+                )
+
+        if safe
+            and staticRouteClear(
+                root.Position,
+                destination,
+                character
+            ) then
+
+            local score =
+                math.min(
+                    clearance,
+                    30
+                )
+
+            if away then
+                score =
+                    score
+                    + entry.Direction:Dot(
+                        away
+                    ) * 6
+            end
+
+            if entry.OutwardFallback then
+                score = score - 8
+            end
+
+            if CurrentDodgeDirection then
+                score =
+                    score
+                    + math.max(
+                        entry.Direction:Dot(
+                            CurrentDodgeDirection
+                        ),
+                        0
+                    ) * 3
+            end
+
+            if validEnemy(enemy) then
+                local enemyRoot =
+                    enemy:FindFirstChild(
+                        "HumanoidRootPart"
+                    )
+
+                if enemyRoot then
+                    local enemyDistance =
+                        (
+                            flat(destination)
+                            - flat(
+                                enemyRoot.Position
+                            )
+                        ).Magnitude
+
+                    local leash =
+                        targetLeashDistance(
+                            enemy
+                        )
+
+                    if enemyDistance > leash then
+                        score =
+                            score
+                            - 60
+                            - (
+                                enemyDistance
+                                - leash
+                            ) * 10
+                    end
+                end
+            end
+
+            if score > bestScore then
+                bestScore = score
+                bestDirection =
+                    entry.Direction
+                bestSide = entry.Side
+            end
+        end
+    end
+
+    if bestDirection then
+        DodgeSide =
+            bestSide or DodgeSide
+
+        return bestDirection
+    end
+
+    return committedLateralFallback(
+        root,
+        enemy,
+        threat
+    )
+end
+
 --------------------------------------------------
 -- SMART ESCAPE
 --------------------------------------------------
@@ -3454,11 +3755,21 @@ local function useAbilities(
     target,
     distance,
     facing,
-    mode
+    mode,
+    remoteCast
 )
+    local extendedCast =
+        remoteCast
+        or distance > ABILITY_RANGE
+
+    local allowedRange =
+        extendedCast
+        and REMOTE_ABILITY_RANGE
+        or ABILITY_RANGE
+
     if not validEnemy(target)
         or not facing
-        or distance > ABILITY_RANGE
+        or distance > allowedRange
         or mode == "DODGE" then
 
         return
@@ -3517,6 +3828,15 @@ local ThreatCurrent =
 
 local ThreatFuture =
     math.huge
+
+local HadThreat = false
+local PreviousThreatLevel = "NONE"
+
+local RemoteCastMode = false
+local RemoteCastTarget = nil
+local RemoteBestDistance = math.huge
+local RemoteLastProgress = 0
+local RemoteCastStarted = 0
 
 local DodgePoint = nil
 local DodgeUntil = 0
@@ -3630,6 +3950,62 @@ local function stuckCheck(root)
     return false
 end
 
+local function updateRemoteCastMode(
+    target,
+    distance,
+    now
+)
+    if target ~= RemoteCastTarget then
+        RemoteCastTarget = target
+        RemoteCastMode = false
+        RemoteBestDistance = distance
+        RemoteLastProgress = now
+        RemoteCastStarted = 0
+    end
+
+    if not validEnemy(target)
+        or distance <= ABILITY_RANGE - 4
+        or distance > REMOTE_ABILITY_RANGE then
+
+        RemoteCastMode = false
+
+        if validEnemy(target) then
+            RemoteBestDistance = distance
+            RemoteLastProgress = now
+        end
+
+        return false
+    end
+
+    if RemoteCastMode then
+        if now - RemoteCastStarted
+            >= REMOTE_CAST_HOLD then
+
+            RemoteCastMode = false
+            RemoteBestDistance = distance
+            RemoteLastProgress = now
+        end
+
+        return RemoteCastMode
+    end
+
+    if distance
+        <= RemoteBestDistance
+            - REMOTE_PROGRESS_STEP then
+
+        RemoteBestDistance = distance
+        RemoteLastProgress = now
+
+    elseif now - RemoteLastProgress
+        >= REMOTE_PROGRESS_TIMEOUT then
+
+        RemoteCastMode = true
+        RemoteCastStarted = now
+    end
+
+    return RemoteCastMode
+end
+
 --------------------------------------------------
 -- MAIN AI
 --------------------------------------------------
@@ -3728,12 +4104,86 @@ connect(
 
         local now = os.clock()
 
+        updateRemoteCastMode(
+            Target,
+            TargetDistance,
+            now
+        )
+
+        local threatAppeared =
+            threat ~= nil
+            and not HadThreat
+
+        local threatEscalated =
+            level == "EMERGENCY"
+            and PreviousThreatLevel
+                ~= "EMERGENCY"
+
+        HadThreat =
+            threat ~= nil
+
+        PreviousThreatLevel =
+            level or "NONE"
+
         if threat then
             LastThreatSeen = now
         elseif now - LastThreatSeen
             >= DODGE_SIDE_RELEASE then
 
             DodgeSide = "NONE"
+        end
+
+        --------------------------------------------------
+        -- ZERO-DELAY FIRST REACTION
+        -- Move immediately, then solve the longer route
+        -- on the following heartbeat.
+        --------------------------------------------------
+
+        if threat
+            and (
+                threatAppeared
+                or threatEscalated
+            ) then
+
+            local immediateDirection =
+                quickDodgeDirection(
+                    character,
+                    root,
+                    Target,
+                    threat
+                )
+
+            if immediateDirection then
+                CurrentDodgeDirection =
+                    immediateDirection.Unit
+
+                Mode =
+                    level == "EMERGENCY"
+                    and "DODGE"
+                    or "EVADE"
+
+                DesiredSpeed =
+                    level == "EMERGENCY"
+                    and DODGE_SPEED
+                    or EVADE_SPEED
+
+                DesiredDirection =
+                    wallSteer(
+                        immediateDirection,
+                        root,
+                        character
+                    )
+
+                if level == "EMERGENCY" then
+                    DodgeUntil =
+                        math.max(
+                            DodgeUntil,
+                            now + DODGE_LOCK
+                        )
+                end
+
+                return
+            end
         end
 
         --------------------------------------------------
@@ -4005,6 +4455,27 @@ connect(
 
         else
             EvadePoint = nil
+        end
+
+        --------------------------------------------------
+        -- UNREACHABLE LONG-RANGE TARGET
+        -- Hold a safe casting position instead of forcing
+        -- movement into a wall or off the arena.
+        --------------------------------------------------
+
+        if RemoteCastMode
+            and validEnemy(Target) then
+
+            Mode = "RANGED"
+            DesiredSpeed = 0
+            DesiredDirection = Vector3.zero
+
+            StuckCount = 0
+            LastPosition = root.Position
+            LastPositionTime = now
+
+            clearPath()
+            return
         end
 
         --------------------------------------------------
@@ -4382,7 +4853,8 @@ RunService:BindToRenderStep(
             Target,
             TargetDistance,
             FacingOkay,
-            Mode
+            Mode,
+            RemoteCastMode
         )
     end
 )
@@ -4404,8 +4876,758 @@ task.spawn(function()
 end)
 
 --------------------------------------------------
+-- RUN AUTOMATION
+--------------------------------------------------
+
+local function startRunAutomation()
+
+local function isVisibleGuiObject(object)
+    local current = object
+
+    while current do
+        if current:IsA("GuiObject")
+            and not current.Visible then
+
+            return false
+        end
+
+        if current:IsA("LayerCollector")
+            and not current.Enabled then
+
+            return false
+        end
+
+        current = current.Parent
+    end
+
+    return true
+end
+
+local function isOwnInterfaceObject(object)
+    local current = object
+
+    for _ = 1, 10 do
+        if not current then
+            break
+        end
+
+        local name =
+            string.lower(
+                current.Name or ""
+            )
+
+        if name:find("xyneria", 1, true)
+            or name:find("dqcombat", 1, true)
+            or name:find("combatpilot", 1, true) then
+
+            return true
+        end
+
+        current = current.Parent
+    end
+
+    return false
+end
+
+local function guiButtonBlob(button)
+    local pieces = {}
+    local current = button
+
+    for _ = 1, 5 do
+        if not current then
+            break
+        end
+
+        table.insert(
+            pieces,
+            string.lower(
+                current.Name or ""
+            )
+        )
+
+        if current:IsA("TextButton")
+            or current:IsA("TextLabel") then
+
+            table.insert(
+                pieces,
+                string.lower(
+                    current.Text or ""
+                )
+            )
+        end
+
+        current = current.Parent
+    end
+
+    for _, descendant in ipairs(
+        button:GetDescendants()
+    ) do
+        if descendant:IsA("TextLabel")
+            or descendant:IsA("TextButton") then
+
+            table.insert(
+                pieces,
+                string.lower(
+                    descendant.Text or ""
+                )
+            )
+        else
+            table.insert(
+                pieces,
+                string.lower(
+                    descendant.Name or ""
+                )
+            )
+        end
+    end
+
+    return table.concat(pieces, " ")
+end
+
+local ACTION_WORDS = {
+    START = {
+        "start dungeon",
+        "startgame",
+        "startbutton",
+        "start button",
+        "begin dungeon",
+        "play dungeon",
+        "start"
+    },
+
+    REPLAY = {
+        "replay",
+        "restart dungeon",
+        "retry dungeon",
+        "play again",
+        "retry"
+    },
+
+    LOBBY = {
+        "back to lobby",
+        "return to lobby",
+        "leave dungeon",
+        "lobbybutton",
+        "lobby button",
+        "lobby",
+        "leave"
+    },
+
+    CONFIRM = {
+        "yes",
+        "confirm",
+        "accept"
+    }
+}
+
+local function actionMatches(blob, action)
+    for _, word in ipairs(
+        ACTION_WORDS[action]
+        or {}
+    ) do
+        if blob:find(
+            word,
+            1,
+            true
+        ) then
+
+            return true
+        end
+    end
+
+    return false
+end
+
+local function getPlayerGui()
+    return LP:FindFirstChildOfClass(
+        "PlayerGui"
+    )
+end
+
+local function findNamedActionButton(action)
+    local playerGui = getPlayerGui()
+
+    if not playerGui then
+        return nil
+    end
+
+    for _, object in ipairs(
+        playerGui:GetDescendants()
+    ) do
+        if object:IsA("GuiButton")
+            and isVisibleGuiObject(object)
+            and not isOwnInterfaceObject(object) then
+
+            local blob =
+                guiButtonBlob(object)
+
+            if action == "START"
+                and (
+                    blob:find("restart", 1, true)
+                    or blob:find("replay", 1, true)
+                    or blob:find("retry", 1, true)
+                ) then
+
+                -- Never confuse replay with the start button.
+
+            elseif actionMatches(
+                blob,
+                action
+            ) then
+
+                return object
+            end
+        end
+    end
+
+    return nil
+end
+
+local function findEndIconButton(action)
+    local playerGui = getPlayerGui()
+    local camera = Workspace.CurrentCamera
+
+    if not playerGui
+        or not camera then
+
+        return nil
+    end
+
+    local viewport =
+        camera.ViewportSize
+
+    local candidates = {}
+
+    for _, object in ipairs(
+        playerGui:GetDescendants()
+    ) do
+        if object:IsA("GuiButton")
+            and isVisibleGuiObject(object)
+            and not isOwnInterfaceObject(object) then
+
+            local size = object.AbsoluteSize
+            local position = object.AbsolutePosition
+
+            local centerX =
+                position.X + size.X / 2
+
+            local centerY =
+                position.Y + size.Y / 2
+
+            local ratio =
+                size.Y > 0
+                and size.X / size.Y
+                or 0
+
+            if size.X >= 28
+                and size.X <= 92
+                and size.Y >= 28
+                and size.Y <= 92
+                and ratio >= 0.70
+                and ratio <= 1.35
+                and centerX
+                    >= viewport.X * 0.75
+                and centerY
+                    >= viewport.Y * 0.64 then
+
+                table.insert(
+                    candidates,
+                    {
+                        Button = object,
+                        X = centerX,
+                        Y = centerY
+                    }
+                )
+            end
+        end
+    end
+
+    table.sort(
+        candidates,
+        function(a, b)
+            if math.abs(a.Y - b.Y) > 22 then
+                return a.Y < b.Y
+            end
+
+            return a.X < b.X
+        end
+    )
+
+    if action == "REPLAY" then
+        return candidates[1]
+            and candidates[1].Button
+            or nil
+    end
+
+    if action == "LOBBY" then
+        return candidates[2]
+            and candidates[2].Button
+            or nil
+    end
+
+    return nil
+end
+
+local function clickGuiButton(button)
+    if not button
+        or not button.Parent
+        or not isVisibleGuiObject(button) then
+
+        return false
+    end
+
+    local activated =
+        pcall(function()
+            button:Activate()
+        end)
+
+    if activated then
+        return true
+    end
+
+    local position = button.AbsolutePosition
+    local size = button.AbsoluteSize
+
+    local x = position.X + size.X / 2
+    local y = position.Y + size.Y / 2
+
+    local success =
+        pcall(function()
+            VirtualInputManager:
+                SendMouseButtonEvent(
+                    x,
+                    y,
+                    0,
+                    true,
+                    game,
+                    0
+                )
+
+            VirtualInputManager:
+                SendMouseButtonEvent(
+                    x,
+                    y,
+                    0,
+                    false,
+                    game,
+                    0
+                )
+        end)
+
+    return success
+end
+
+local function confirmGameAction()
+    task.spawn(function()
+        for _ = 1, 10 do
+            task.wait(0.20)
+
+            local confirm =
+                findNamedActionButton(
+                    "CONFIRM"
+                )
+
+            if confirm
+                and clickGuiButton(confirm) then
+
+                return
+            end
+        end
+    end)
+end
+
+local function triggerGameAction(action)
+    local button =
+        findNamedActionButton(action)
+
+    if not button
+        and (
+            action == "REPLAY"
+            or action == "LOBBY"
+        ) then
+
+        button =
+            findEndIconButton(action)
+    end
+
+    if not clickGuiButton(button) then
+        return false
+    end
+
+    if action ~= "START" then
+        confirmGameAction()
+    end
+
+    return true
+end
+
+local function visibleCompletionSignal()
+    local playerGui = getPlayerGui()
+
+    if not playerGui then
+        return false
+    end
+
+    local signals = {
+        "dungeon complete",
+        "dungeon completed",
+        "victory",
+        "completion rewards",
+        "run complete"
+    }
+
+    for _, object in ipairs(
+        playerGui:GetDescendants()
+    ) do
+        if (
+            object:IsA("TextLabel")
+            or object:IsA("TextButton")
+        )
+            and isVisibleGuiObject(object) then
+
+            local text =
+                string.lower(
+                    object.Text or ""
+                )
+
+            for _, signal in ipairs(signals) do
+                if text:find(
+                    signal,
+                    1,
+                    true
+                ) then
+
+                    return true
+                end
+            end
+        end
+    end
+
+    return false
+end
+
+local RunSawEnemy = false
+local EmptyRunSince = nil
+local PostRunActionTaken = false
+local LastPostRunAttempt = 0
+local LastAutoStartAttempt = 0
+local LastAutomationTick = 0
+
+connect(
+    RunService.Heartbeat,
+    function()
+        if not State.Alive then
+            return
+        end
+
+        local now = os.clock()
+
+        if now - LastAutomationTick < 0.25 then
+            return
+        end
+
+        LastAutomationTick = now
+
+        if AUTO_START
+            and now - LastAutoStartAttempt
+                >= 1.25 then
+
+            if triggerGameAction("START") then
+                LastAutoStartAttempt = now
+            end
+        end
+
+        local aliveEnemies = 0
+
+        for enemy in pairs(Enemies) do
+            if validEnemy(enemy) then
+                aliveEnemies =
+                    aliveEnemies + 1
+            end
+        end
+
+        if aliveEnemies > 0 then
+            RunSawEnemy = true
+            EmptyRunSince = nil
+            PostRunActionTaken = false
+
+            return
+        end
+
+        if not RunSawEnemy then
+            return
+        end
+
+        if not EmptyRunSince then
+            EmptyRunSince = now
+        end
+
+        local completionReady =
+            visibleCompletionSignal()
+            or (
+                now - EmptyRunSince >= 4
+                and not findNextRoom(
+                    LastRoomOrder
+                )
+            )
+
+        if not completionReady
+            or PostRunActionTaken
+            or now - LastPostRunAttempt < 0.75 then
+
+            return
+        end
+
+        local action =
+            AUTO_LOBBY
+            and "LOBBY"
+            or AUTO_REPLAY
+                and "REPLAY"
+                or nil
+
+        if not action then
+            return
+        end
+
+        LastPostRunAttempt = now
+
+        if triggerGameAction(action) then
+            PostRunActionTaken = true
+        end
+    end
+)
+
+end
+
+startRunAutomation()
+
+--------------------------------------------------
 -- GUI
 --------------------------------------------------
+
+local function createInterface()
+
+local XYNERIA_UI_URL =
+    "https://raw.githubusercontent.com/itsmashood/xyneria-Ui/main/dist/XyneriaUI.lua"
+
+local XyneriaApp = nil
+local XyneriaStatus = nil
+local AutoReplayToggle = nil
+local AutoLobbyToggle = nil
+
+local interfaceLoaded =
+    pcall(function()
+        local source =
+            game:HttpGet(
+                XYNERIA_UI_URL
+            )
+
+        local compile,
+            compileError =
+                loadstring(source)
+
+        if not compile then
+            error(compileError)
+        end
+
+        local XyneriaUI = compile()
+
+        if not XyneriaUI then
+            error("XyneriaUI returned no library")
+        end
+
+        local app =
+            XyneriaUI:CreateWindow({
+                Title = "DUNGEON QUEST",
+                Author = "XYNERIA",
+                Version = "V7.2",
+                Live = true,
+                StatusTitle = "COMBAT PILOT",
+                Size = UDim2.fromOffset(
+                    680,
+                    455
+                ),
+                MinSize = Vector2.new(
+                    520,
+                    340
+                ),
+                OpenButton = {
+                    Title = "DQ",
+                    Enabled = true,
+                    Draggable = true,
+                    OnlyMobile = false,
+                    Scale = 0.46
+                }
+            })
+
+        if not app then
+            error("Xyneria window was not created")
+        end
+
+        local CombatTab =
+            app:Tab({
+                Title = "Combat",
+                Icon = "swords"
+            })
+
+        CombatTab:Toggle({
+            Title = "Combat Pilot",
+            Desc = "Movement, targeting and smart dodging",
+            Value = ENABLED,
+            Flag = "DQCombatPilot",
+            Callback = function(value)
+                ENABLED = value
+
+                if not value then
+                    DesiredDirection =
+                        Vector3.zero
+                end
+            end
+        })
+
+        CombatTab:Toggle({
+            Title = "Auto Q",
+            Desc = "Automatically cast the Q spell",
+            Value = AUTO_Q,
+            Flag = "DQAutoQ",
+            Callback = function(value)
+                AUTO_Q = value
+            end
+        })
+
+        CombatTab:Toggle({
+            Title = "Auto E",
+            Desc = "Automatically cast the E spell",
+            Value = AUTO_E,
+            Flag = "DQAutoE",
+            Callback = function(value)
+                AUTO_E = value
+            end
+        })
+
+        local AutomationTab =
+            app:Tab({
+                Title = "Automation",
+                Icon = "repeat"
+            })
+
+        AutomationTab:Paragraph({
+            Title = "Dungeon flow",
+            Desc = "Replay and Lobby are mutually exclusive."
+        })
+
+        AutomationTab:Toggle({
+            Title = "Auto Start",
+            Desc = "Press Start when the dungeon start button appears",
+            Value = AUTO_START,
+            Flag = "DQAutoStart",
+            Callback = function(value)
+                AUTO_START = value
+            end
+        })
+
+        AutoReplayToggle =
+            AutomationTab:Toggle({
+                Title = "Auto Replay",
+                Desc = "Use the curly-arrow button after completion",
+                Value = AUTO_REPLAY,
+                Flag = "DQAutoReplay",
+                Callback = function(value)
+                    AUTO_REPLAY = value
+
+                    if value then
+                        AUTO_LOBBY = false
+
+                        if AutoLobbyToggle then
+                            AutoLobbyToggle:Set(
+                                false,
+                                true
+                            )
+                        end
+                    end
+                end
+            })
+
+        AutoLobbyToggle =
+            AutomationTab:Toggle({
+                Title = "Auto Back to Lobby",
+                Desc = "Use the door button after completion",
+                Value = AUTO_LOBBY,
+                Flag = "DQAutoLobby",
+                Callback = function(value)
+                    AUTO_LOBBY = value
+
+                    if value then
+                        AUTO_REPLAY = false
+
+                        if AutoReplayToggle then
+                            AutoReplayToggle:Set(
+                                false,
+                                true
+                            )
+                        end
+                    end
+                end
+            })
+
+        local StatusTab =
+            app:Tab({
+                Title = "Status",
+                Icon = "activity"
+            })
+
+        XyneriaStatus =
+            StatusTab:Code({
+                Content = "Combat Pilot is starting..."
+            })
+
+        local SettingsTab =
+            app:Tab({
+                Title = "Settings",
+                Icon = "settings"
+            })
+
+        SettingsTab:Button({
+            Title = "Save configuration",
+            Callback = function()
+                local ok =
+                    app:SaveConfig(
+                        "dungeon_quest"
+                    )
+
+                app:Notify(
+                    "Configuration",
+                    ok
+                        and "Saved."
+                        or "Could not save.",
+                    ok and "check" or "x",
+                    2
+                )
+            end
+        })
+
+        SettingsTab:Button({
+            Title = "Load configuration",
+            Callback = function()
+                local ok =
+                    app:LoadConfig(
+                        "dungeon_quest"
+                    )
+
+                app:Notify(
+                    "Configuration",
+                    ok
+                        and "Loaded."
+                        or "Could not load.",
+                    ok and "check" or "x",
+                    2
+                )
+            end
+        })
+
+        XyneriaApp = app
+        State.Interface = app
+    end)
 
 local gui =
     Instance.new(
@@ -4417,6 +5639,10 @@ gui.Name =
 
 gui.ResetOnSpawn =
     false
+
+gui.Enabled =
+    not interfaceLoaded
+    or XyneriaApp == nil
 
 pcall(function()
     gui.Parent =
@@ -4735,7 +5961,7 @@ connect(
             )
             or "-"
 
-        status.Text =
+        local statusText =
             "Mode: "
             .. Mode
 
@@ -4804,10 +6030,24 @@ connect(
             .. tostring(
                 StuckCount
             )
+
+        status.Text = statusText
+
+        if XyneriaStatus then
+            pcall(function()
+                XyneriaStatus:Set(
+                    statusText
+                )
+            end)
+        end
     end
 )
 
 refreshButtons()
+
+end
+
+createInterface()
 
 print(
     "Dungeon Quest Combat Pilot V7.2 loaded"
