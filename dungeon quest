@@ -1,6 +1,7 @@
---// Dungeon Quest Combat Pilot V7.1 STABLE
---// Predictive dodge + aggressive combat + path recovery
+--// Dungeon Quest Combat Pilot V7.2
+--// Left/right committed dodge + expanding hazard prediction
 --// Maximum WalkSpeed = 20
+--// Startup-safe hazard scan + corrected Beam tracking
 --//
 --// Q = Inner Focus
 --// E = Geyser
@@ -50,6 +51,12 @@ local BODY_RADIUS = 2.2
 
 local PREDICT_NEAR = 0.20
 local PREDICT_FAR = 0.45
+local EXPAND_PREDICT = 0.72
+
+local EXPAND_RATE_MIN = 1.25
+local EXPAND_WARNING_EXTRA = 9.5
+local EXPAND_EMERGENCY_EXTRA = 3.0
+local EXPAND_OUTWARD_WEIGHT = 0.32
 
 local WARNING_EXTRA = 5.5
 local EMERGENCY_EXTRA = 1.5
@@ -81,6 +88,7 @@ local VISUAL_LIFE = 0.35
 local DODGE_LOCK = 0.36
 local DODGE_REPLAN = 0.13
 local EVADE_REPLAN = 0.20
+local DODGE_SIDE_RELEASE = 0.65
 
 local DODGE_RADII = {
     8,
@@ -96,10 +104,8 @@ local EVADE_RADII = {
     16
 }
 
-local DIRECTION_COUNT = 12
-
 local ROUTE_SAMPLES = 7
-local TOP_CANDIDATES = 8
+local TOP_CANDIDATES = 24
 
 --------------------------------------------------
 -- PATHING
@@ -155,7 +161,8 @@ local oldStates = {
     "DQ_COMBAT_V61",
     "DQ_COMBAT_V62",
     "DQ_COMBAT_V7",
-    "DQ_COMBAT_V71"
+    "DQ_COMBAT_V71",
+    "DQ_COMBAT_V72"
 }
 
 for _, name in ipairs(oldStates) do
@@ -171,7 +178,8 @@ local oldRenderNames = {
     "DQ_COMBAT_V61_RENDER",
     "DQ_COMBAT_V62_RENDER",
     "DQ_COMBAT_V7_RENDER",
-    "DQ_COMBAT_V71_RENDER"
+    "DQ_COMBAT_V71_RENDER",
+    "DQ_COMBAT_V72_RENDER"
 }
 
 for _, name in ipairs(oldRenderNames) do
@@ -183,10 +191,10 @@ end
 local State = {
     Alive = true,
     Connections = {},
-    RenderName = "DQ_COMBAT_V71_RENDER"
+    RenderName = "DQ_COMBAT_V72_RENDER"
 }
 
-ENV.DQ_COMBAT_V71 = State
+ENV.DQ_COMBAT_V72 = State
 
 --------------------------------------------------
 -- CLEAN GUI
@@ -201,7 +209,8 @@ pcall(function()
         "DQCombatV61",
         "DQCombatV62",
         "DQCombatV7",
-        "DQCombatV71"
+        "DQCombatV71",
+        "DQCombatV72"
     }
 
     for _, name in ipairs(names) do
@@ -462,7 +471,7 @@ local function setupDungeon()
     )
 end
 
-setupDungeon()
+pcall(setupDungeon)
 
 local function fallbackEnemyScan()
     if not dungeon then
@@ -969,7 +978,7 @@ local function createVisual(
         )
 
     box.Name =
-        "DQ_V71_Hazard"
+        "DQ_V72_Hazard"
 
     box.Adornee = part
     box.LineThickness = 0.04
@@ -1037,6 +1046,7 @@ local function registerHazardPart(
         Type = "PART",
         Kind = kind,
         Object = part,
+        Name = nameBlob(part),
 
         Created = now,
 
@@ -1046,10 +1056,19 @@ local function registerHazardPart(
         PrevPosition =
             part.Position,
 
+        PrevSize =
+            part.Size,
+
         PrevTime = now,
 
         Velocity =
             Vector3.zero,
+
+        SizeVelocity =
+            Vector3.zero,
+
+        Expanding = false,
+        ExpandRate = 0,
 
         Visual =
             createVisual(
@@ -1092,15 +1111,11 @@ local function registerBeam(beam)
     local a1 = nil
 
     if beam.Attachment0 then
-        a0 =
-            beam.Attachment0.
-                WorldPosition
+        a0 = beam.Attachment0.WorldPosition
     end
 
     if beam.Attachment1 then
-        a1 =
-            beam.Attachment1.
-                WorldPosition
+        a1 = beam.Attachment1.WorldPosition
     end
 
     Hazards[beam] = {
@@ -1123,12 +1138,9 @@ local function registerBeam(beam)
         watchedBeams[beam] = true
 
         connect(
-            beam:
-            GetPropertyChangedSignal(
-                "Enabled"
-            ),
+            beam:GetPropertyChangedSignal("Enabled"),
             function()
-                if beam.Enabled then
+                if beam.Parent and beam.Enabled then
                     if not Hazards[beam] then
                         registerBeam(beam)
                     end
@@ -1177,30 +1189,26 @@ connect(
 -- EXISTING KNOWN HAZARDS
 --------------------------------------------------
 
-for _, object in ipairs(
-    Workspace:GetDescendants()
-) do
-    if object:IsA("Beam") then
-        registerBeam(object)
-
-    elseif object:IsA(
-        "BasePart"
-    ) then
-
-        local kind =
-            classifyPart(
-                object,
-                false
-            )
-
-        if kind then
-            registerHazardPart(
-                object,
-                kind
-            )
+task.spawn(function()
+    for _, object in ipairs(Workspace:GetDescendants()) do
+        if not State.Alive then
+            return
         end
+
+        pcall(function()
+            if object:IsA("Beam") then
+                registerBeam(object)
+
+            elseif object:IsA("BasePart") then
+                local kind = classifyPart(object, false)
+
+                if kind then
+                    registerHazardPart(object, kind)
+                end
+            end
+        end)
     end
-end
+end)
 
 --------------------------------------------------
 -- UPDATE HAZARD MOTION
@@ -1247,11 +1255,37 @@ local function updateHazards()
                         - hazard.PrevPosition
                     ) / dt
 
+                local sizeVelocity =
+                    (
+                        part.Size
+                        - hazard.PrevSize
+                    ) / dt
+
                 hazard.Velocity =
                     hazard.Velocity:Lerp(
                         velocity,
                         0.6
                     )
+
+                hazard.SizeVelocity =
+                    hazard.SizeVelocity:Lerp(
+                        sizeVelocity,
+                        0.55
+                    )
+
+                local horizontalGrowth =
+                    math.max(
+                        hazard.SizeVelocity.X,
+                        hazard.SizeVelocity.Z,
+                        0
+                    )
+
+                hazard.ExpandRate =
+                    horizontalGrowth
+
+                hazard.Expanding =
+                    horizontalGrowth
+                        >= EXPAND_RATE_MIN
 
                 local speed =
                     flat(
@@ -1260,6 +1294,9 @@ local function updateHazards()
 
                 hazard.PrevPosition =
                     part.Position
+
+                hazard.PrevSize =
+                    part.Size
 
                 hazard.PrevTime =
                     now
@@ -1323,13 +1360,8 @@ local function updateHazards()
                 Hazards[object] = nil
 
             else
-                local a0 =
-                    beam.Attachment0.
-                        WorldPosition
-
-                local a1 =
-                    beam.Attachment1.
-                        WorldPosition
+                local a0 = beam.Attachment0.WorldPosition
+                local a1 = beam.Attachment1.WorldPosition
 
                 local dt =
                     math.max(
@@ -1403,6 +1435,18 @@ local function partDistance(
             predictedPosition
         ) * rotation
 
+    local sizeVelocity =
+        hazard.SizeVelocity
+        or Vector3.zero
+
+    local predictedSize =
+        part.Size
+        + Vector3.new(
+            math.max(sizeVelocity.X, 0),
+            math.max(sizeVelocity.Y, 0),
+            math.max(sizeVelocity.Z, 0)
+        ) * future
+
     local localPosition =
         predictedCF:
         PointToObjectSpace(
@@ -1414,7 +1458,7 @@ local function partDistance(
             math.abs(
                 localPosition.X
             )
-            - part.Size.X / 2,
+            - predictedSize.X / 2,
             0
         )
 
@@ -1423,7 +1467,7 @@ local function partDistance(
             math.abs(
                 localPosition.Z
             )
-            - part.Size.Z / 2,
+            - predictedSize.Z / 2,
             0
         )
 
@@ -1485,15 +1529,8 @@ local function beamDistance(
         return math.huge
     end
 
-    local a0 =
-        hazard.A0
-        or beam.Attachment0.
-            WorldPosition
-
-    local a1 =
-        hazard.A1
-        or beam.Attachment1.
-            WorldPosition
+    local a0 = hazard.A0 or beam.Attachment0.WorldPosition
+    local a1 = hazard.A1 or beam.Attachment1.WorldPosition
 
     a0 =
         a0
@@ -1587,6 +1624,23 @@ local function getThreat(position)
     for _, hazard in pairs(
         Hazards
     ) do
+        local expansionHorizon =
+            hazard.Expanding
+            and EXPAND_PREDICT
+            or PREDICT_FAR
+
+        local name =
+            hazard.Name or ""
+
+        local bobStyleCircle =
+            hazard.Expanding
+            and (
+                name:find("circle", 1, true)
+                or name:find("cricle", 1, true)
+                or name:find("bob", 1, true)
+                or name:find("slam", 1, true)
+            ) ~= nil
+
         local current =
             hazardDistance(
                 position,
@@ -1605,7 +1659,7 @@ local function getThreat(position)
             hazardDistance(
                 position,
                 hazard,
-                PREDICT_FAR
+                expansionHorizon
             )
 
         local predicted =
@@ -1621,9 +1675,19 @@ local function getThreat(position)
             current
                 <= BODY_RADIUS
                     + EMERGENCY_EXTRA
+                    + (
+                        bobStyleCircle
+                        and EXPAND_EMERGENCY_EXTRA
+                        or 0
+                    )
             or nearFuture
                 <= BODY_RADIUS
                     + 0.7
+                    + (
+                        bobStyleCircle
+                        and EXPAND_EMERGENCY_EXTRA
+                        or 0
+                    )
 
         local warning =
             false
@@ -1633,12 +1697,20 @@ local function getThreat(position)
                 predicted
                     <= BODY_RADIUS
                         + WARNING_EXTRA
+                        + (
+                            bobStyleCircle
+                            and EXPAND_WARNING_EXTRA
+                            or hazard.Expanding
+                                and 3.5
+                                or 0
+                        )
                 and (
                     closing > 0.20
                     or current
                         <= BODY_RADIUS + 3
                     or hazard.Kind
                         == "PRECAST"
+                    or hazard.Expanding
                 )
         end
 
@@ -2026,7 +2098,9 @@ local function routeSafe(
             local future =
                 math.min(
                     eta * alpha,
-                    PREDICT_FAR
+                    hazard.Expanding
+                        and EXPAND_PREDICT
+                        or PREDICT_FAR
                 )
 
             local distance =
@@ -2066,7 +2140,9 @@ local function routeSafe(
                 hazard,
                 math.min(
                     eta,
-                    PREDICT_FAR
+                    hazard.Expanding
+                        and EXPAND_PREDICT
+                        or PREDICT_FAR
                 )
             )
 
@@ -2204,15 +2280,8 @@ local function threatEscapeDirection(
             return nil
         end
 
-        local a =
-            hazard.A0
-            or beam.Attachment0.
-                WorldPosition
-
-        local b =
-            hazard.A1
-            or beam.Attachment1.
-                WorldPosition
+        local a = hazard.A0 or beam.Attachment0.WorldPosition
+        local b = hazard.A1 or beam.Attachment1.WorldPosition
 
         a =
             a
@@ -2300,6 +2369,9 @@ end
 local CurrentDodgeDirection =
     nil
 
+local DodgeSide = "NONE"
+local LastThreatSeen = 0
+
 local function candidateDirections(
     root,
     threat,
@@ -2307,7 +2379,11 @@ local function candidateDirections(
 )
     local directions = {}
 
-    local function add(direction)
+    local function add(
+        direction,
+        side,
+        outwardFallback
+    )
         direction =
             flat(direction)
 
@@ -2320,7 +2396,7 @@ local function candidateDirections(
         for _, existing in ipairs(
             directions
         ) do
-            if existing:Dot(
+            if existing.Direction:Dot(
                 direction
             ) > 0.985 then
 
@@ -2330,76 +2406,17 @@ local function candidateDirections(
 
         table.insert(
             directions,
-            direction
+            {
+                Direction = direction,
+                Side = side,
+                OutwardFallback =
+                    outwardFallback == true
+            }
         )
     end
 
     ------------------------------------------------
-    -- FULL CIRCLE
-    ------------------------------------------------
-
-    for i = 1,
-        DIRECTION_COUNT do
-
-        local angle =
-            (
-                i - 1
-            )
-            / DIRECTION_COUNT
-            * math.pi
-            * 2
-
-        add(
-            Vector3.new(
-                math.cos(angle),
-                0,
-                math.sin(angle)
-            )
-        )
-    end
-
-    ------------------------------------------------
-    -- THREAT-AWARE
-    ------------------------------------------------
-
-    local away =
-        threatEscapeDirection(
-            root.Position,
-            threat
-        )
-
-    if away then
-        add(away)
-
-        add(
-            Vector3.new(
-                -away.Z,
-                0,
-                away.X
-            )
-        )
-
-        add(
-            Vector3.new(
-                away.Z,
-                0,
-                -away.X
-            )
-        )
-    end
-
-    ------------------------------------------------
-    -- KEEP CURRENT DODGE
-    ------------------------------------------------
-
-    if CurrentDodgeDirection then
-        add(
-            CurrentDodgeDirection
-        )
-    end
-
-    ------------------------------------------------
-    -- ENEMY TANGENTS
+    -- LEFT / RIGHT RELATIVE TO THE ENEMY
     ------------------------------------------------
 
     if validEnemy(enemy) then
@@ -2418,26 +2435,191 @@ local function candidateDirections(
             if toward.Magnitude > 0.05 then
                 toward = toward.Unit
 
-                add(
+                local left =
                     Vector3.new(
                         -toward.Z,
                         0,
                         toward.X
                     )
-                )
 
-                add(
-                    Vector3.new(
-                        toward.Z,
-                        0,
-                        -toward.X
-                    )
-                )
+                local right = -left
+                local outward = -toward
+
+                if DodgeSide == "NONE"
+                    or DodgeSide == "LEFT" then
+
+                    add(left, "LEFT", false)
+
+                    if threat
+                        and threat.Expanding then
+
+                        add(
+                            left
+                            + outward
+                                * EXPAND_OUTWARD_WEIGHT,
+                            "LEFT",
+                            true
+                        )
+                    end
+                end
+
+                if DodgeSide == "NONE"
+                    or DodgeSide == "RIGHT" then
+
+                    add(right, "RIGHT", false)
+
+                    if threat
+                        and threat.Expanding then
+
+                        add(
+                            right
+                            + outward
+                                * EXPAND_OUTWARD_WEIGHT,
+                            "RIGHT",
+                            true
+                        )
+                    end
+                end
             end
         end
     end
 
+    ------------------------------------------------
+    -- NO ENEMY FALLBACK: STILL MOVE SIDEWAYS TO THREAT
+    ------------------------------------------------
+
+    if #directions == 0 then
+        local away =
+            threatEscapeDirection(
+                root.Position,
+                threat
+            )
+
+        if away then
+            local left =
+                Vector3.new(
+                    -away.Z,
+                    0,
+                    away.X
+                )
+
+            if DodgeSide == "NONE"
+                or DodgeSide == "LEFT" then
+
+                add(left, "LEFT", false)
+            end
+
+            if DodgeSide == "NONE"
+                or DodgeSide == "RIGHT" then
+
+                add(-left, "RIGHT", false)
+            end
+        end
+    end
+
+    if #directions == 0
+        and CurrentDodgeDirection then
+
+        add(
+            CurrentDodgeDirection,
+            DodgeSide,
+            false
+        )
+    end
+
     return directions
+end
+
+local function committedLateralFallback(
+    root,
+    enemy,
+    threat
+)
+    if validEnemy(enemy) then
+        local enemyRoot =
+            enemy:FindFirstChild(
+                "HumanoidRootPart"
+            )
+
+        if enemyRoot then
+            local toward =
+                flat(
+                    enemyRoot.Position
+                    - root.Position
+                )
+
+            if toward.Magnitude > 0.05 then
+                toward = toward.Unit
+
+                local left =
+                    Vector3.new(
+                        -toward.Z,
+                        0,
+                        toward.X
+                    )
+
+                if DodgeSide == "NONE" then
+                    local away =
+                        threatEscapeDirection(
+                            root.Position,
+                            threat
+                        )
+
+                    if away
+                        and (-left):Dot(away)
+                            > left:Dot(away) then
+
+                        DodgeSide = "RIGHT"
+                    else
+                        DodgeSide = "LEFT"
+                    end
+                end
+
+                local direction =
+                    DodgeSide == "RIGHT"
+                    and -left
+                    or left
+
+                if threat
+                    and threat.Expanding then
+
+                    direction =
+                        direction
+                        - toward
+                            * EXPAND_OUTWARD_WEIGHT
+                end
+
+                return direction.Unit
+            end
+        end
+    end
+
+    local away =
+        threatEscapeDirection(
+            root.Position,
+            threat
+        )
+
+    if away then
+        if DodgeSide == "NONE" then
+            DodgeSide = "LEFT"
+        end
+
+        local left =
+            Vector3.new(
+                -away.Z,
+                0,
+                away.X
+            )
+
+        return (
+            DodgeSide == "RIGHT"
+            and -left
+            or left
+        ).Unit
+    end
+
+    return CurrentDodgeDirection
 end
 
 --------------------------------------------------
@@ -2468,9 +2650,12 @@ local function findEscape(
 
     local options = {}
 
-    for _, direction in ipairs(
+    for _, entry in ipairs(
         directions
     ) do
+        local direction =
+            entry.Direction
+
         for _, radius in ipairs(
             radii
         ) do
@@ -2500,6 +2685,10 @@ local function findEscape(
                         clearance,
                         25
                     ) * 1.0
+
+                if entry.OutwardFallback then
+                    score = score + 100
+                end
 
                 if validEnemy(enemy) then
                     local enemyRoot =
@@ -2557,7 +2746,13 @@ local function findEscape(
                             candidate,
 
                         Score =
-                            score
+                            score,
+
+                        Side =
+                            entry.Side,
+
+                        OutwardFallback =
+                            entry.OutwardFallback
                     }
                 )
             end
@@ -2580,6 +2775,7 @@ local function findEscape(
         )
 
     local best = nil
+    local bestSide = nil
     local bestScore =
         math.huge
 
@@ -2621,12 +2817,13 @@ local function findEscape(
                 if score < bestScore then
                     bestScore = score
                     best = grounded
+                    bestSide = option.Side
                 end
             end
         end
     end
 
-    return best
+    return best, bestSide
 end
 
 --------------------------------------------------
@@ -2807,7 +3004,7 @@ local function createFacing(root)
         )
 
     FacingAttachment.Name =
-        "DQ_V71_FacingAttachment"
+        "DQ_V72_FacingAttachment"
 
     FacingAttachment.Parent =
         root
@@ -2818,7 +3015,7 @@ local function createFacing(root)
         )
 
     FacingAlign.Name =
-        "DQ_V71_Facing"
+        "DQ_V72_Facing"
 
     FacingAlign.Mode =
         Enum.OrientationAlignmentMode.
@@ -3172,7 +3369,12 @@ connect(
 
         ThreatKind =
             threat
-            and threat.Kind
+            and (
+                threat.Expanding
+                and "EXPANDING-"
+                    .. threat.Kind
+                or threat.Kind
+            )
             or "NONE"
 
         ThreatCurrent =
@@ -3182,6 +3384,14 @@ connect(
             futureDistance
 
         local now = os.clock()
+
+        if threat then
+            LastThreatSeen = now
+        elseif now - LastThreatSeen
+            >= DODGE_SIDE_RELEASE then
+
+            DodgeSide = "NONE"
+        end
 
         --------------------------------------------------
         -- EMERGENCY
@@ -3205,7 +3415,8 @@ connect(
                 and now - LastDodgePlan
                     >= DODGE_REPLAN then
 
-                local point =
+                local point,
+                    side =
                     findEscape(
                         character,
                         root,
@@ -3216,6 +3427,8 @@ connect(
 
                 if point then
                     DodgePoint = point
+                    DodgeSide =
+                        side or DodgeSide
 
                     local direction =
                         flat(
@@ -3247,40 +3460,11 @@ connect(
                 DesiredSpeed = DODGE_SPEED
 
                 local fallback =
-                    threatEscapeDirection(
-                        root.Position,
+                    committedLateralFallback(
+                        root,
+                        Target,
                         threat
                     )
-
-                if not fallback
-                    and Target
-                    and validEnemy(Target) then
-
-                    local enemyRoot =
-                        Target:FindFirstChild(
-                            "HumanoidRootPart"
-                        )
-
-                    if enemyRoot then
-                        local toward =
-                            flat(
-                                enemyRoot.Position
-                                - root.Position
-                            )
-
-                        if toward.Magnitude > 0.05 then
-                            toward = toward.Unit
-
-                            fallback =
-                                Vector3.new(
-                                    -toward.Z,
-                                    0,
-                                    toward.X
-                                )
-                                * OrbitSide
-                        end
-                    end
-                end
 
                 if fallback then
                     CurrentDodgeDirection =
@@ -3319,7 +3503,8 @@ connect(
                 and now - LastDodgePlan
                     >= DODGE_REPLAN then
 
-                local newPoint =
+                local newPoint,
+                    newSide =
                     findEscape(
                         character,
                         root,
@@ -3330,6 +3515,8 @@ connect(
 
                 if newPoint then
                     DodgePoint = newPoint
+                    DodgeSide =
+                        newSide or DodgeSide
 
                     local direction =
                         flat(
@@ -3415,7 +3602,10 @@ connect(
                 and now - LastEvadePlan
                     >= EVADE_REPLAN then
 
-                EvadePoint =
+                local side
+
+                EvadePoint,
+                    side =
                     findEscape(
                         character,
                         root,
@@ -3423,6 +3613,11 @@ connect(
                         threat,
                         true
                     )
+
+                if EvadePoint then
+                    DodgeSide =
+                        side or DodgeSide
+                end
 
                 LastEvadePlan = now
             end
@@ -3444,64 +3639,25 @@ connect(
             -- FALLBACK STRAFE
             --------------------------------------------------
 
-            if validEnemy(Target) then
-                local enemyRoot =
-                    Target:FindFirstChild(
-                        "HumanoidRootPart"
+            local fallback =
+                committedLateralFallback(
+                    root,
+                    Target,
+                    threat
+                )
+
+            if fallback then
+                CurrentDodgeDirection =
+                    fallback
+
+                DesiredDirection =
+                    wallSteer(
+                        fallback,
+                        root,
+                        character
                     )
 
-                if enemyRoot then
-                    local toward =
-                        flat(
-                            enemyRoot.Position
-                            - root.Position
-                        )
-
-                    if toward.Magnitude > 0.05 then
-                        local radial =
-                            toward.Unit
-
-                        local tangent =
-                            Vector3.new(
-                                -radial.Z,
-                                0,
-                                radial.X
-                            )
-                            * OrbitSide
-
-                        local away =
-                            threatEscapeDirection(
-                                root.Position,
-                                threat
-                            )
-
-                        local movement =
-                            tangent
-
-                        if away then
-                            movement =
-                                movement
-                                + away * 0.55
-                        end
-
-                        if TargetDistance
-                            > DESIRED_DISTANCE + 7 then
-
-                            movement =
-                                movement
-                                + radial * 0.55
-                        end
-
-                        DesiredDirection =
-                            wallSteer(
-                                movement,
-                                root,
-                                character
-                            )
-
-                        return
-                    end
-                end
+                return
             end
 
         else
@@ -3896,8 +4052,7 @@ task.spawn(function()
     while State.Alive do
         task.wait(4)
 
-        if Mode == "ORBIT"
-            or Mode == "EVADE" then
+        if Mode == "ORBIT" then
 
             OrbitSide =
                 -OrbitSide
@@ -3915,7 +4070,7 @@ local gui =
     )
 
 gui.Name =
-    "DQCombatV71"
+    "DQCombatV72"
 
 gui.ResetOnSpawn =
     false
@@ -4010,7 +4165,7 @@ main.Font =
 main.TextSize = 13
 
 main.Text =
-    "COMBAT PILOT V7.1: ON"
+    "COMBAT PILOT V7.2: ON"
 
 main.Parent =
     frame
@@ -4139,7 +4294,7 @@ Connect(function()
     ENABLED = not ENABLED
 
     main.Text =
-        "COMBAT PILOT V7.1: "
+        "COMBAT PILOT V7.2: "
         .. (
             ENABLED
             and "ON"
@@ -4182,6 +4337,7 @@ connect(
         local hazards = 0
         local lasers = 0
         local projectiles = 0
+        local expanding = 0
         local enemies = 0
 
         for _, hazard in pairs(
@@ -4189,6 +4345,11 @@ connect(
         ) do
             hazards =
                 hazards + 1
+
+            if hazard.Expanding then
+                expanding =
+                    expanding + 1
+            end
 
             if hazard.Kind
                 == "LASER" then
@@ -4270,6 +4431,11 @@ connect(
             .. " / "
             .. future
 
+            .. "\nDodge side: "
+            .. DodgeSide
+            .. " | Expand:"
+            .. expanding
+
             .. "\nHazards: "
             .. hazards
             .. " | Lasers:"
@@ -4301,5 +4467,5 @@ connect(
 refreshButtons()
 
 print(
-    "Dungeon Quest Combat Pilot V7.1 STABLE loaded"
+    "Dungeon Quest Combat Pilot V7.2 loaded"
 )
