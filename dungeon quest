@@ -1,4 +1,4 @@
---// Dungeon Quest Combat Pilot V7.2
+--// Dungeon Quest Combat Pilot V7.3
 --// Left/right committed dodge + expanding hazard prediction
 --// Maximum WalkSpeed = 20
 --// Startup-safe hazard scan + corrected Beam tracking
@@ -46,7 +46,7 @@ local BOB_LEASH_DISTANCE = 26
 local LEASH_INWARD_START = 4
 local LEASH_MAX_INWARD = 0.72
 
-local ABILITY_RANGE = 75
+local ABILITY_RANGE = 30
 local REMOTE_ABILITY_RANGE = 160
 local REMOTE_PROGRESS_TIMEOUT = 1.35
 local REMOTE_PROGRESS_STEP = 2.0
@@ -149,6 +149,7 @@ local WAYPOINT_DISTANCE = 4
 local STUCK_INTERVAL = 0.55
 local MIN_PROGRESS = 0.80
 local STUCK_RESET_LIMIT = 5
+local STATIONARY_DISTANCE = 0.15
 
 --------------------------------------------------
 -- CLEAN OLD VERSIONS
@@ -199,7 +200,8 @@ local oldStates = {
     "DQ_COMBAT_V62",
     "DQ_COMBAT_V7",
     "DQ_COMBAT_V71",
-    "DQ_COMBAT_V72"
+    "DQ_COMBAT_V72",
+    "DQ_COMBAT_V73"
 }
 
 for _, name in ipairs(oldStates) do
@@ -216,7 +218,8 @@ local oldRenderNames = {
     "DQ_COMBAT_V62_RENDER",
     "DQ_COMBAT_V7_RENDER",
     "DQ_COMBAT_V71_RENDER",
-    "DQ_COMBAT_V72_RENDER"
+    "DQ_COMBAT_V72_RENDER",
+    "DQ_COMBAT_V73_RENDER"
 }
 
 for _, name in ipairs(oldRenderNames) do
@@ -228,12 +231,17 @@ end
 local State = {
     Alive = true,
     Connections = {},
-    RenderName = "DQ_COMBAT_V72_RENDER",
+    RenderName = "DQ_COMBAT_V73_RENDER",
     OwnAbilityIgnoreUntil = 0,
-    SpacingActive = false
+    SpacingActive = false,
+    SpamSpells = false,
+    TargetIsBoss = false,
+    BossCheckTarget = nil,
+    BossCheckResult = false,
+    BossCheckTime = 0
 }
 
-ENV.DQ_COMBAT_V72 = State
+ENV.DQ_COMBAT_V73 = State
 
 --------------------------------------------------
 -- CLEAN GUI
@@ -250,6 +258,7 @@ pcall(function()
         "DQCombatV7",
         "DQCombatV71",
         "DQCombatV72",
+        "DQCombatV73",
         "XyneriaUI",
         "WindUI"
     }
@@ -650,6 +659,112 @@ local function validEnemy(model)
     return humanoid ~= nil
         and humanoid.Health > 0
         and root ~= nil
+end
+
+function State:IsBossEnemy(enemy)
+    if not validEnemy(enemy) then
+        return false
+    end
+
+    local now = os.clock()
+
+    if self.BossCheckTarget == enemy
+        and now - self.BossCheckTime < 0.50 then
+
+        return self.BossCheckResult
+    end
+
+    self.BossCheckTarget = enemy
+    self.BossCheckResult = false
+    self.BossCheckTime = now
+
+    local profileBosses =
+        DungeonData.Profile
+        and DungeonData.Profile.BossNames
+
+    if type(profileBosses) == "table" then
+        for key, value in pairs(profileBosses) do
+            local bossName =
+                type(key) == "number"
+                and value
+                or key
+
+            if string.lower(tostring(bossName))
+                == string.lower(enemy.Name) then
+
+                self.BossCheckResult = true
+                return true
+            end
+        end
+    end
+
+    local current = enemy
+
+    for _ = 1, 7 do
+        if not current then
+            break
+        end
+
+        local lowerName =
+            string.lower(current.Name or "")
+
+        if lowerName:find("boss", 1, true)
+            or current:GetAttribute("IsBoss") == true
+            or current:GetAttribute("Boss") == true then
+
+            self.BossCheckResult = true
+            return true
+        end
+
+        local marker =
+            current:FindFirstChild("IsBoss")
+            or current:FindFirstChild("Boss")
+
+        if marker
+            and marker:IsA("BoolValue")
+            and marker.Value then
+
+            self.BossCheckResult = true
+            return true
+        end
+
+        current = current.Parent
+    end
+
+    local isTagged = false
+
+    pcall(function()
+        isTagged =
+            game:GetService("CollectionService"):
+            HasTag(enemy, "Boss")
+    end)
+
+    if isTagged then
+        self.BossCheckResult = true
+        return true
+    end
+
+    local playerGui =
+        LP:FindFirstChildOfClass("PlayerGui")
+
+    if playerGui then
+        for _, object in ipairs(
+            playerGui:GetDescendants()
+        ) do
+            if object:IsA("TextLabel")
+                and object.Visible
+                and string.lower(
+                    tostring(object.Text or "")
+                ) == string.lower(enemy.Name)
+                and object.AbsoluteSize.X >= 140 then
+
+                self.BossCheckResult = true
+                return true
+            end
+        end
+    end
+
+    return false
 end
 
 local function registerEnemy(model)
@@ -1320,7 +1435,7 @@ local function createVisual(
         )
 
     box.Name =
-        "DQ_V72_Hazard"
+        "DQ_V73_Hazard"
 
     box.Adornee = part
     box.LineThickness = 0.04
@@ -3879,7 +3994,7 @@ local function createFacing(root)
         )
 
     FacingAttachment.Name =
-        "DQ_V72_FacingAttachment"
+        "DQ_V73_FacingAttachment"
 
     FacingAttachment.Parent =
         root
@@ -3890,7 +4005,7 @@ local function createFacing(root)
         )
 
     FacingAlign.Name =
-        "DQ_V72_Facing"
+        "DQ_V73_Facing"
 
     FacingAlign.Mode =
         Enum.OrientationAlignmentMode.
@@ -4235,10 +4350,22 @@ local SpellFlow = (function()
     end
 
     function flow:ShouldHold()
+        if State.SpamSpells then
+            return false
+        end
+
         return self.Waiting
     end
 
     function flow:Status()
+        if State.SpamSpells then
+            return "SPAM MODE"
+        end
+
+        if State.TargetIsBoss then
+            return "BOSS RECAST"
+        end
+
         if self.Waiting then
             return "WAIT COOLDOWN"
         end
@@ -4272,12 +4399,54 @@ local SpellFlow = (function()
     )
         local extendedCast =
             remoteCast
-            or distance > ABILITY_RANGE
+            and not State.SpamSpells
 
         local allowedRange =
             extendedCast
             and REMOTE_ABILITY_RANGE
             or ABILITY_RANGE
+
+        local now = os.clock()
+
+        if State.SpamSpells
+            or State.TargetIsBoss then
+            if not validEnemy(target)
+                or distance > allowedRange
+                or mode == "DODGE" then
+
+                return
+            end
+
+            if AUTO_Q
+                and now - self.LastQ
+                    >= 0.50 then
+
+                self.LastQ = now
+
+                State.OwnAbilityIgnoreUntil =
+                    now + OWN_BUFF_IGNORE_TIME
+
+                pressKey(
+                    Enum.KeyCode.Q,
+                    0x51
+                )
+            end
+
+            if AUTO_E
+                and facing
+                and now - self.LastE
+                    >= 0.50 then
+
+                self.LastE = now
+
+                pressKey(
+                    Enum.KeyCode.E,
+                    0x45
+                )
+            end
+
+            return
+        end
 
         if not self.PackActive
             and not self.Waiting
@@ -4296,8 +4465,6 @@ local SpellFlow = (function()
 
             return
         end
-
-        local now = os.clock()
 
         if AUTO_Q and not self.QUsed then
             self.QUsed = true
@@ -4385,6 +4552,10 @@ local LastPositionTime =
     os.clock()
 
 local StuckCount = 0
+local StationaryCount = 0
+local StationaryRoot = nil
+local StationaryPosition = nil
+local StationaryTime = os.clock()
 
 local function resetStuckCharacter(root)
     local character =
@@ -4397,6 +4568,10 @@ local function resetStuckCharacter(root)
         )
 
     StuckCount = 0
+    StationaryCount = 0
+    StationaryRoot = nil
+    StationaryPosition = nil
+    StationaryTime = os.clock()
     LastPosition = nil
     LastPositionTime = os.clock()
     DesiredDirection = Vector3.zero
@@ -4499,6 +4674,77 @@ local function stuckCheck(root)
     return false
 end
 
+local function stationaryResetCheck(root)
+    local now = os.clock()
+
+    local intentionallyStill =
+        not ENABLED
+        or Mode == "OFF"
+        or Mode == "COOLDOWN"
+        or Mode == "RANGED"
+        or Mode == "BOSS HOLD"
+        or Mode == "RESETTING"
+
+    local movementExpected =
+        not intentionallyStill
+        and (
+            validEnemy(Target)
+            or (
+                DesiredSpeed > 1
+                and DesiredDirection.Magnitude > 0.3
+            )
+        )
+
+    if StationaryRoot ~= root then
+        StationaryRoot = root
+        StationaryPosition = root.Position
+        StationaryTime = now
+        StationaryCount = 0
+        return false
+    end
+
+    if not movementExpected then
+        StationaryPosition = root.Position
+        StationaryTime = now
+        StationaryCount = 0
+        return false
+    end
+
+    if now - StationaryTime
+        < STUCK_INTERVAL then
+
+        return false
+    end
+
+    local moved =
+        (
+            flat(root.Position)
+            - flat(
+                StationaryPosition
+                    or root.Position
+            )
+        ).Magnitude
+
+    StationaryPosition = root.Position
+    StationaryTime = now
+
+    if moved <= STATIONARY_DISTANCE then
+        StationaryCount =
+            StationaryCount + 1
+    else
+        StationaryCount = 0
+    end
+
+    if StationaryCount
+        > STUCK_RESET_LIMIT then
+
+        resetStuckCharacter(root)
+        return true
+    end
+
+    return false
+end
+
 local function updateRemoteCastMode(
     target,
     distance,
@@ -4590,12 +4836,19 @@ connect(
         -- TARGET IMMEDIATELY
         --------------------------------------------------
 
+        if next(Hazards) ~= nil then
+            fallbackEnemyScan()
+        end
+
         Target,
             TargetDistance =
                 chooseTarget(
                     root.Position,
                     Target
                 )
+
+        State.TargetIsBoss =
+            State:IsBossEnemy(Target)
 
         if Target then
             local order =
@@ -4738,6 +4991,10 @@ connect(
 
                 return
             end
+        end
+
+        if stationaryResetCheck(root) then
+            return
         end
 
         --------------------------------------------------
@@ -5275,7 +5532,40 @@ connect(
         -- FORCED PERSONAL SPACE WITH HYSTERESIS
         --------------------------------------------------
 
-        if State.SpacingActive then
+        if State.TargetIsBoss then
+            local radial = toward.Unit
+
+            if TargetDistance
+                < FORCE_SPACE_ENTER then
+
+                Mode = "BOSS SPACE"
+                DesiredSpeed = SPACE_SPEED
+                DesiredDirection =
+                    wallSteer(
+                        -radial,
+                        root,
+                        character
+                    )
+
+            elseif TargetDistance
+                > DESIRED_DISTANCE + 2 then
+
+                Mode = "BOSS CHASE"
+                DesiredSpeed = CHASE_SPEED
+                DesiredDirection =
+                    wallSteer(
+                        radial,
+                        root,
+                        character
+                    )
+
+            else
+                Mode = "BOSS HOLD"
+                DesiredSpeed = 0
+                DesiredDirection = Vector3.zero
+            end
+
+        elseif State.SpacingActive then
 
             Mode = "SPACE"
             DesiredSpeed = SPACE_SPEED
@@ -6013,7 +6303,7 @@ local function createInterface()
                 XyneriaUI:CreateWindow({
                     Title = "DUNGEON QUEST",
                     Author = "XYNERIA",
-                    Version = "V7.2",
+                    Version = "V7.3",
                     Live = true,
                     StatusTitle = "COMBAT PILOT",
                     Folder = "Xyneria_DungeonQuest",
@@ -6104,6 +6394,16 @@ local function createInterface()
                 Flag = "DQAutoE",
                 Callback = function(value)
                     AUTO_E = value
+                end
+            })
+
+            combatControls:Toggle({
+                Title = "Spam Spells",
+                Desc = "Use Q/E repeatedly near enemies; skip pack waiting",
+                Value = State.SpamSpells,
+                Flag = "DQSpamSpells",
+                Callback = function(value)
+                    State.SpamSpells = value
                 end
             })
 
@@ -6368,6 +6668,12 @@ local function createInterface()
                             and "YES"
                             or "NO"
                         )
+                        .. " | Type:"
+                        .. (
+                            State.TargetIsBoss
+                            and "BOSS"
+                            or "MOB"
+                        )
                         .. "\nThreat: "
                         .. ThreatLevel
                         .. " / "
@@ -6394,6 +6700,8 @@ local function createInterface()
                         .. pathText
                         .. " | Stuck:"
                         .. tostring(StuckCount)
+                        .. " | Still:"
+                        .. tostring(StationaryCount)
                         .. "\nSpells: "
                         .. SpellFlow:Status()
                         .. "\nProfile: "
@@ -6422,7 +6730,7 @@ local function createInterface()
             )
 
             app:Notify(
-                "Combat Pilot V7.2",
+                "Combat Pilot V7.3",
                 "Footagesus WindUI loaded with the Xyneria theme.",
                 "check",
                 2
@@ -6440,5 +6748,5 @@ end
 createInterface()
 
 print(
-    "Dungeon Quest Combat Pilot V7.2 loaded"
+    "Dungeon Quest Combat Pilot V7.3 loaded"
 )
