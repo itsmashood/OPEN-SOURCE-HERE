@@ -2,6 +2,7 @@ local v1 = game:GetService("Players")
 local v2 = game:GetService("RunService")
 local v3 = game:GetService("UserInputService")
 local v134 = game:GetService("ReplicatedStorage")
+local v144 = game:GetService("Lighting")
 
 local v4 = v1.LocalPlayer
 local v5 = v4:WaitForChild("PlayerGui")
@@ -17,7 +18,6 @@ local v6 = {
 
 	BlurStrength = 10.5,
 	CharacterBlur = 1,
-	CharacterLighting = 0.85,
 
 	ScanInterval = 0.5,
 	PetSearchRadius = 22,
@@ -28,7 +28,7 @@ local v6 = {
 
 	Window = {
 		Width = 270,
-		Height = 270,
+		Height = 200,
 		MinWidth = 230,
 		MinHeight = 180,
 		MaxWidth = 420,
@@ -78,7 +78,6 @@ end
 local v11 = {
 	BlurStrength = v6.BlurStrength,
 	CharacterBlur = v6.CharacterBlur,
-	CharacterLighting = v6.CharacterLighting
 }
 
 local v12 = Instance.new("BlurEffect")
@@ -308,9 +307,6 @@ v28("Character Blur", 0, 1, v11.CharacterBlur, 2, function(v119)
 	v11.CharacterBlur = v119
 end)
 
-v28("Lighting", 0, 1, v11.CharacterLighting, 2, function(v119)
-	v11.CharacterLighting = v119
-end)
 
 local v40 = Instance.new("ImageButton")
 v40.Name = "FloatingPFP"
@@ -571,6 +567,118 @@ local function v67(v87)
 	v59[v87] = nil
 end
 
+local function v145(v8)
+	return v8:IsA("BasePart")
+		or v8:IsA("Bone")
+		or v8:IsA("Motor6D")
+		or v8:IsA("Attachment")
+		or v8:IsA("Decal")
+		or v8:IsA("Texture")
+		or v8:IsA("SurfaceAppearance")
+		or v8:IsA("SpecialMesh")
+		or v8:IsA("ParticleEmitter")
+		or v8:IsA("Trail")
+		or v8:IsA("Beam")
+		or v8:IsA("Light")
+		or v8:IsA("Highlight")
+end
+
+local function v146(v147, v148)
+	if not v147 or not v148 or not v147.Parent or not v148.Parent then
+		return
+	end
+
+	if v147:IsA("BasePart") and v148:IsA("BasePart") then
+		v148.Color = v147.Color
+		v148.Material = v147.Material
+		v148.MaterialVariant = v147.MaterialVariant
+		v148.Reflectance = v147.Reflectance
+
+		if v147:IsA("MeshPart") and v148:IsA("MeshPart") then
+			v148.TextureID = v147.TextureID
+		end
+
+	elseif v147:IsA("Attachment") and v148:IsA("Attachment")
+		and not v147:IsA("Bone") then
+
+		v148.CFrame = v147.CFrame
+
+	elseif v147:IsA("Decal") and v148:IsA("Decal") then
+		v148.Texture = v147.Texture
+		v148.Color3 = v147.Color3
+		v148.Transparency = v147.Transparency
+
+	elseif v147:IsA("Texture") and v148:IsA("Texture") then
+		v148.Texture = v147.Texture
+		v148.Color3 = v147.Color3
+		v148.Transparency = v147.Transparency
+		v148.OffsetStudsU = v147.OffsetStudsU
+		v148.OffsetStudsV = v147.OffsetStudsV
+		v148.StudsPerTileU = v147.StudsPerTileU
+		v148.StudsPerTileV = v147.StudsPerTileV
+
+	elseif v147:IsA("SurfaceAppearance") and v148:IsA("SurfaceAppearance") then
+		v148.ColorMap = v147.ColorMap
+		v148.MetalnessMap = v147.MetalnessMap
+		v148.NormalMap = v147.NormalMap
+		v148.RoughnessMap = v147.RoughnessMap
+		v148.AlphaMode = v147.AlphaMode
+
+	elseif v147:IsA("SpecialMesh") and v148:IsA("SpecialMesh") then
+		v148.MeshId = v147.MeshId
+		v148.TextureId = v147.TextureId
+		v148.Scale = v147.Scale
+		v148.Offset = v147.Offset
+		v148.VertexColor = v147.VertexColor
+
+	elseif v147:IsA("ParticleEmitter") and v148:IsA("ParticleEmitter") then
+		v148.Enabled = v147.Enabled
+		v148.Color = v147.Color
+		v148.Transparency = v147.Transparency
+		v148.LightEmission = v147.LightEmission
+		v148.LightInfluence = v147.LightInfluence
+		v148.Brightness = v147.Brightness
+		v148.Texture = v147.Texture
+		v148.Rate = v147.Rate
+		v148.Speed = v147.Speed
+		v148.Size = v147.Size
+		v148.Lifetime = v147.Lifetime
+
+	elseif v147:IsA("Trail") and v148:IsA("Trail") then
+		v148.Enabled = v147.Enabled
+		v148.Color = v147.Color
+		v148.Transparency = v147.Transparency
+		v148.LightEmission = v147.LightEmission
+		v148.LightInfluence = v147.LightInfluence
+		v148.Texture = v147.Texture
+		v148.Lifetime = v147.Lifetime
+
+	elseif v147:IsA("Beam") and v148:IsA("Beam") then
+		v148.Enabled = v147.Enabled
+		v148.Color = v147.Color
+		v148.Transparency = v147.Transparency
+		v148.LightEmission = v147.LightEmission
+		v148.LightInfluence = v147.LightInfluence
+		v148.Texture = v147.Texture
+		v148.Width0 = v147.Width0
+		v148.Width1 = v147.Width1
+
+	elseif v147:IsA("Light") and v148:IsA("Light") then
+		v148.Enabled = v147.Enabled
+		v148.Color = v147.Color
+		v148.Brightness = v147.Brightness
+		v148.Range = v147.Range
+		v148.Shadows = v147.Shadows
+
+	elseif v147:IsA("Highlight") and v148:IsA("Highlight") then
+		v148.Enabled = v147.Enabled
+		v148.FillColor = v147.FillColor
+		v148.FillTransparency = v147.FillTransparency
+		v148.OutlineColor = v147.OutlineColor
+		v148.OutlineTransparency = v147.OutlineTransparency
+	end
+end
+
 local function v69(v87, v120)
 	if not v87 or not v87.Parent then
 		return nil
@@ -579,10 +687,7 @@ local function v69(v87, v120)
 	local v70 = {}
 
 	for v125, v8 in ipairs(v87:GetDescendants()) do
-		if v8:IsA("BasePart")
-			or v8:IsA("Bone")
-			or v8:IsA("Motor6D") then
-
+		if v145(v8) then
 			local v71 = v60()
 			v8:SetAttribute("v205", v71)
 			v70[v71] = v8
@@ -599,10 +704,7 @@ local function v69(v87, v120)
 	v87.Archivable = v72
 
 	for v125, v8 in ipairs(v87:GetDescendants()) do
-		if v8:IsA("BasePart")
-			or v8:IsA("Bone")
-			or v8:IsA("Motor6D") then
-
+		if v145(v8) then
 			v8:SetAttribute("v205", nil)
 		end
 	end
@@ -614,41 +716,32 @@ local function v69(v87, v120)
 	local v75 = {}
 	local v76 = {}
 	local v77 = {}
+	local v149 = {}
 
 	for v125, v8 in ipairs(v74:GetDescendants()) do
 		if v8:IsA("Script") or v8:IsA("LocalScript") then
 			v8:Destroy()
-
-		elseif v8:IsA("BasePart") then
+		elseif v145(v8) then
 			local v71 = v8:GetAttribute("v205")
 			local v78 = v71 and v70[v71]
 
-			if v78 and v78:IsA("BasePart") then
-				v75[v78] = v8
-			end
+			if v78 then
+				if v8:IsA("BasePart") and v78:IsA("BasePart") then
+					v75[v78] = v8
+					v8.Anchored = true
+					v8.CanCollide = false
+					v8.CanTouch = false
+					v8.CanQuery = false
 
-			v8:SetAttribute("v205", nil)
-			v8.Anchored = true
-			v8.CanCollide = false
-			v8.CanTouch = false
-			v8.CanQuery = false
+				elseif v8:IsA("Bone") and v78:IsA("Bone") then
+					v76[v78] = v8
 
-		elseif v8:IsA("Bone") then
-			local v71 = v8:GetAttribute("v205")
-			local v78 = v71 and v70[v71]
+				elseif v8:IsA("Motor6D") and v78:IsA("Motor6D") then
+					v77[v78] = v8
 
-			if v78 and v78:IsA("Bone") then
-				v76[v78] = v8
-			end
-
-			v8:SetAttribute("v205", nil)
-
-		elseif v8:IsA("Motor6D") then
-			local v71 = v8:GetAttribute("v205")
-			local v78 = v71 and v70[v71]
-
-			if v78 and v78:IsA("Motor6D") then
-				v77[v78] = v8
+				else
+					v149[v78] = v8
+				end
 			end
 
 			v8:SetAttribute("v205", nil)
@@ -663,7 +756,9 @@ local function v69(v87, v120)
 		clone = v74,
 		partMap = v75,
 		boneMap = v76,
-		motorMap = v77
+		motorMap = v77,
+		visualMap = v149,
+		descendantCount = #v87:GetDescendants()
 	}
 end
 
@@ -675,6 +770,21 @@ local function v79(v87, v120)
 	local v80 = v59[v87]
 	if v80 then
 		v80.kind = v120
+
+		local v150 = #v87:GetDescendants()
+		if v80.descendantCount ~= v150 then
+			if v80.clone then
+				v80.clone:Destroy()
+			end
+
+			local v81 = v69(v87, v120)
+			if v81 then
+				v59[v87] = v81
+			else
+				v59[v87] = nil
+			end
+		end
+
 		return
 	end
 
@@ -696,9 +806,13 @@ local function v82(v87, v68)
 	for v78, v127 in pairs(v68.partMap or {}) do
 		if v78 and v78.Parent and v127 and v127.Parent then
 			v127.CFrame = v78.CFrame
+
 			if v127.Size ~= v78.Size then
 				v127.Size = v78.Size
 			end
+
+			v146(v78, v127)
+
 			v127.Transparency = math.max(
 				v78.Transparency,
 				1 - v84
@@ -718,6 +832,10 @@ local function v82(v87, v68)
 			and v129
 			and v129.Parent then
 
+			if v129.CFrame ~= v128.CFrame then
+				v129.CFrame = v128.CFrame
+			end
+
 			v129.Transform = v128.Transform
 		end
 	end
@@ -728,8 +846,20 @@ local function v82(v87, v68)
 			and v131
 			and v131.Parent then
 
+			if v131.C0 ~= v130.C0 then
+				v131.C0 = v130.C0
+			end
+
+			if v131.C1 ~= v130.C1 then
+				v131.C1 = v130.C1
+			end
+
 			v131.Transform = v130.Transform
 		end
+	end
+
+	for v147, v148 in pairs(v68.visualMap or {}) do
+		v146(v147, v148)
 	end
 
 	return true
@@ -934,10 +1064,13 @@ v2:BindToRenderStep("v204", Enum.RenderPriority.Last.Value, function()
 	v55.CFrame = v102.CFrame
 	v55.FieldOfView = v102.FieldOfView
 
-	local v103 = math.clamp(math.floor(80 + v11.CharacterLighting * 175), 0, 255)
-	v54.Ambient = Color3.fromRGB(v103, v103, v103)
-	v54.LightColor = Color3.fromRGB(v103, v103, v103)
-	v54.LightDirection = Vector3.new(-1, -1, -1)
+	v54.Ambient = v144.Ambient
+
+	local v151 = math.clamp(v144.Brightness / 3, 0, 1)
+	v54.LightColor = v144.OutdoorAmbient:Lerp(Color3.new(1, 1, 1), v151)
+
+	local v152 = v144:GetSunDirection()
+	v54.LightDirection = Vector3.new(-v152.X, -v152.Y, -v152.Z)
 
 	local v104 = false
 
