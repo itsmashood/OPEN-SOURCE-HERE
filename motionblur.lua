@@ -1,4 +1,4 @@
-local v1 = game:GetService("Players")
+
 local v2 = game:GetService("RunService")
 local v3 = game:GetService("UserInputService")
 local v134 = game:GetService("ReplicatedStorage")
@@ -819,7 +819,7 @@ local function v82(v87, v68)
 			)
 
 			if v83 then
-				v78.LocalTransparencyModifier = 0
+				v78.LocalTransparencyModifier = math.clamp(v84, 0, 1)
 			else
 				v78.LocalTransparencyModifier = 1
 			end
@@ -1064,10 +1064,14 @@ v2:BindToRenderStep("v204", Enum.RenderPriority.Last.Value, function()
 	v55.CFrame = v102.CFrame
 	v55.FieldOfView = v102.FieldOfView
 
-	v54.Ambient = v144.Ambient
+	local v153 = math.clamp(
+		0.68 + (v144.Brightness * 0.055) + (v144.ExposureCompensation * 0.035),
+		0.68,
+		0.92
+	)
 
-	local v151 = math.clamp(v144.Brightness / 3, 0, 1)
-	v54.LightColor = v144.OutdoorAmbient:Lerp(Color3.new(1, 1, 1), v151)
+	v54.Ambient = v144.OutdoorAmbient:Lerp(Color3.new(1, 1, 1), v153)
+	v54.LightColor = v144.ColorShift_Top:Lerp(Color3.new(1, 1, 1), 0.88)
 
 	local v152 = v144:GetSunDirection()
 	v54.LightDirection = Vector3.new(-v152.X, -v152.Y, -v152.Z)
