@@ -80,11 +80,38 @@ local v11 = {
 	CharacterBlur = v6.CharacterBlur,
 }
 
-local v12 = Instance.new("BlurEffect")
-v12.Name = "v201"
+local function v156()
+	local v157 = workspace.CurrentCamera
+
+	if v157 then
+		for v125, v158 in ipairs(v157:GetChildren()) do
+			if v158:IsA("BlurEffect") and v158.Name ~= "v201" then
+				return v158
+			end
+		end
+	end
+
+	for v125, v158 in ipairs(v144:GetChildren()) do
+		if v158:IsA("BlurEffect") and v158.Name ~= "v201" then
+			return v158
+		end
+	end
+
+	return nil
+end
+
+local v12 = v156()
+local v159 = v12 ~= nil
+
+if not v12 then
+	v12 = Instance.new("BlurEffect")
+	v12.Name = "v201"
+end
+
 v12.Size = v11.BlurStrength
 v12.Enabled = true
-if workspace.CurrentCamera then
+
+if not v159 and workspace.CurrentCamera then
 	v12.Parent = workspace.CurrentCamera
 end
 
@@ -942,8 +969,13 @@ local function v137()
 
 	for v141, v142 in pairs(v140) do
 		local v143 = v142 and v142.char
-		if v142
-			and v142.controller == v4
+		local v160 = v142 and (
+			v142.controller == v4
+			or v142.player == v4
+			or v142.entity_controller == v4
+		)
+
+		if v160
 			and typeof(v143) == "Instance"
 			and v143:IsA("Model")
 			and v143:IsDescendantOf(workspace) then
@@ -1000,6 +1032,25 @@ local function v93()
 	return v98
 end
 
+local v161 = {}
+local v162 = 0
+
+local function v163()
+	local v164 = os.clock()
+	if v164 - v162 < 2.5 then
+		return v161
+	end
+
+	v162 = v164
+
+	local v165, v166 = pcall(v93)
+	if v165 and type(v166) == "table" then
+		v161 = v166
+	end
+
+	return v161
+end
+
 local function v99()
 	local v100 = {}
 
@@ -1009,6 +1060,12 @@ local function v99()
 
 	if v57 and v57.Parent then
 		for v141, v143 in ipairs(v137()) do
+			if v143 ~= v57 then
+				v100[v143] = "pet"
+			end
+		end
+
+		for v141, v143 in ipairs(v163()) do
 			if v143 ~= v57 then
 				v100[v143] = "pet"
 			end
@@ -1054,7 +1111,19 @@ v2:BindToRenderStep("v204", Enum.RenderPriority.Last.Value, function()
 		return
 	end
 
-	if v12.Parent ~= v102 then
+	if v159 then
+		if not v12.Parent then
+			local v167 = v156()
+			if v167 then
+				v12 = v167
+			else
+				v159 = false
+				v12 = Instance.new("BlurEffect")
+				v12.Name = "v201"
+				v12.Parent = v102
+			end
+		end
+	elseif v12.Parent ~= v102 then
 		v12.Parent = v102
 	end
 
