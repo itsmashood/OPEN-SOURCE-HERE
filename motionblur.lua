@@ -587,6 +587,14 @@ local function v67(v87)
 
 	v66(v87)
 
+	if v68.connections then
+		for v125, v169 in pairs(v68.connections) do
+			pcall(function()
+				v169:Disconnect()
+			end)
+		end
+	end
+
 	if v68.clone then
 		v68.clone:Destroy()
 	end
@@ -778,15 +786,26 @@ local function v69(v87, v120)
 	v74.Name = "v206_" .. v120 .. "_Clone"
 	v74.Parent = v56
 
-	return {
+	local v168 = {
 		kind = v120,
 		clone = v74,
 		partMap = v75,
 		boneMap = v76,
 		motorMap = v77,
 		visualMap = v149,
-		descendantCount = #v87:GetDescendants()
+		dirty = false,
+		connections = {}
 	}
+
+	v168.connections[1] = v87.DescendantAdded:Connect(function()
+		v168.dirty = true
+	end)
+
+	v168.connections[2] = v87.DescendantRemoving:Connect(function()
+		v168.dirty = true
+	end)
+
+	return v168
 end
 
 local function v79(v87, v120)
@@ -798,8 +817,15 @@ local function v79(v87, v120)
 	if v80 then
 		v80.kind = v120
 
-		local v150 = #v87:GetDescendants()
-		if v80.descendantCount ~= v150 then
+		if v80.dirty then
+			if v80.connections then
+				for v125, v169 in pairs(v80.connections) do
+					pcall(function()
+						v169:Disconnect()
+					end)
+				end
+			end
+
 			if v80.clone then
 				v80.clone:Destroy()
 			end
@@ -820,7 +846,6 @@ local function v79(v87, v120)
 		v59[v87] = v81
 	end
 end
-
 local function v82(v87, v68)
 	if not v87 or not v87.Parent or not v68 or not v68.clone or not v68.clone.Parent then
 		v67(v87)
@@ -1059,15 +1084,19 @@ local function v99()
 	end
 
 	if v57 and v57.Parent then
-		for v141, v143 in ipairs(v137()) do
+		local v170 = v137()
+
+		for v141, v143 in ipairs(v170) do
 			if v143 ~= v57 then
 				v100[v143] = "pet"
 			end
 		end
 
-		for v141, v143 in ipairs(v163()) do
-			if v143 ~= v57 then
-				v100[v143] = "pet"
+		if #v170 == 0 then
+			for v141, v143 in ipairs(v163()) do
+				if v143 ~= v57 then
+					v100[v143] = "pet"
+				end
 			end
 		end
 	end
