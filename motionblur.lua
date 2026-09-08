@@ -1163,13 +1163,13 @@ v2:BindToRenderStep("v204", Enum.RenderPriority.Last.Value, function()
 	v55.FieldOfView = v102.FieldOfView
 
 	local v153 = math.clamp(
-		0.68 + (v144.Brightness * 0.055) + (v144.ExposureCompensation * 0.035),
-		0.68,
-		0.92
+		0.52 + (v144.Brightness * 0.04) + (v144.ExposureCompensation * 0.02),
+		0.52,
+		0.78
 	)
 
 	v54.Ambient = v144.OutdoorAmbient:Lerp(Color3.new(1, 1, 1), v153)
-	v54.LightColor = v144.ColorShift_Top:Lerp(Color3.new(1, 1, 1), 0.88)
+	v54.LightColor = v144.ColorShift_Top:Lerp(Color3.new(1, 1, 1), 0.72)
 
 	local v152 = v144:GetSunDirection()
 	v54.LightDirection = Vector3.new(-v152.X, -v152.Y, -v152.Z)
